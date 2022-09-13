@@ -31,6 +31,7 @@ async fn cache_update_loop() {
         TaiAllocator::total_allocated()
     );
     println!("Total allocations profiled: {}", TaiAllocator::profiled());
+    println!("Size of symbol map: {}", TaiAllocator::symbol_map_size());
 }
 
 async fn insert_one(cache: &mut Cache<String, String>, s: String) {

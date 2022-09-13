@@ -7,8 +7,16 @@ edition = "2021"
 
 [dependencies]
 backtrace = "0.3.66"
+chashmap = "2.2"
+once_cell = "1.14"
 rand = { version = "0.8", features = ["small_rng"] }  # no-std, so no allocation
+wyhash = "0.5.0"
 
 [dev-dependencies]
 tokio = { version = "1.20.1", features = ["full"] }
 moka = "0.9"
+
+[profile.bench]
+strip = "none"
+# debug = 1 means line charts only, which is minimum needed for good stack traces
+debug = 1
