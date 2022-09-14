@@ -37,16 +37,14 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
 use backtrace::{Backtrace, BacktraceFrame};
-use chashmap::CHashMap;
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
 
 pub mod callstack;
-use callstack::{Callstack, MAX_NUM_FRAMES};
+use callstack::StdCallstack;
 
-/// Maximum number of stack frames to keep
-const DEFAULT_MAX_FRAMES: usize = 20;
 /// Allocation sampling ratio.  Eg: 500 means 1 in 500 allocations are sampled.
 const DEFAULT_SAMPLING_RATIO: u32 = 500;
 /// The number of frames at the top of the stack to skip.  Most of these have to do with
@@ -57,37 +55,7 @@ const DEFAULT_SAMPLING_RATIO: u32 = 500;
 const TOP_FRAMES_TO_SKIP: usize = 4;
 
 // A map for caching symbols in backtraces so we can mostly store u64's
-type SymbolMap = CHashMap<u64, BacktraceFrame>;
-
-// The goal here is to clean up some things from the backtrace:
-// - remove backtrace::backtrace frames at the top
-// - remove poll() frames
-// - only keep a certain number of frames max (limit)
-fn cleanup_backtrace(trace: &backtrace::Backtrace, limit: usize) -> Vec<BacktraceFrame> {
-    // For now, we take resolved frames only.
-    // In the future, we can heavily optimize this: take unresolved frames, use a cache,
-    // identify IPs that we have skipped in the past, etc. etc.
-    // Use IP list to identify identical places in the code, etc.
-    trace
-        .frames()
-        .iter()
-        .skip(TOP_FRAMES_TO_SKIP)
-        .filter(|&f| {
-            let symbols = f.symbols();
-            !symbols.is_empty() && {
-                // We should really further filter traces later. Move this logic out
-                if let Some(symbol_name) = symbols[0].name() {
-                    let demangled = format!("{:?}", symbol_name);
-                    !demangled.contains("Future>::poll::")
-                } else {
-                    false
-                }
-            }
-        })
-        .take(limit)
-        .cloned()
-        .collect()
-}
+type SymbolMap = DashMap<u64, BacktraceFrame>;
 
 /// Tai is a memory profiling Allocator wrapper.
 /// Tai is the Swahili word for an eagle.
@@ -101,25 +69,82 @@ impl TaiAllocator {
         ALLOCATED.load(SeqCst)
     }
 
-    pub fn profiled() -> usize {
+    // Total bytes allocated for profiled allocations
+    pub fn profiled_bytes() -> usize {
         PROFILED.load(SeqCst)
     }
 
     pub fn symbol_map_size() -> usize {
         TAI_STATE.symbol_map.len()
     }
+
+    /// Dumps out a report on the top k stack traces by bytes allocated
+    pub fn print_top_k_stacks_by_bytes(k: usize) {
+        let total_profiled_bytes = PROFILED.load(SeqCst);
+        let stacks_by_alloc = stack_list_allocated_bytes_desc();
+        stacks_by_alloc
+            .iter()
+            .take(k)
+            .for_each(|&(stack_hash, bytes_allocated)| {
+                let stats = TAI_STATE
+                    .stack_stats
+                    .get(&stack_hash)
+                    .expect("Did stats get removed?");
+                let pct = (bytes_allocated as f64) * 100.0 / (total_profiled_bytes as f64);
+                println!(
+                    "\n---\n{} bytes allocated ({pct:.2}%) ({} allocations)",
+                    stats.allocated_bytes, stats.num_allocations
+                );
+                println!("{}", stats.stack.with_symbols(&TAI_STATE.symbol_map));
+            })
+    }
+}
+
+/// Central struct collecting stats about each stack trace
+#[derive(Debug, Clone)]
+struct StackStats {
+    stack: StdCallstack,
+    allocated_bytes: u64,
+    num_allocations: u64,
+}
+
+impl StackStats {
+    fn new(stack: StdCallstack, initial_alloc_bytes: Option<u64>) -> Self {
+        Self {
+            stack,
+            allocated_bytes: initial_alloc_bytes.unwrap_or(0),
+            num_allocations: initial_alloc_bytes.map(|_| 1).unwrap_or(0),
+        }
+    }
 }
 
 // Private state.  We can't put this in the main TaiAllocator struct as that one has to be const static
 struct TaiState {
     symbol_map: SymbolMap,
+    // Main map of stack hash to StackStats
+    stack_stats: DashMap<u64, StackStats>,
 }
 
 // lazily initialized global state
 static TAI_STATE: Lazy<TaiState> = Lazy::new(|| {
     let symbol_map = SymbolMap::with_capacity(1000);
-    TaiState { symbol_map }
+    let stack_stats = DashMap::with_capacity(1000);
+    TaiState {
+        symbol_map,
+        stack_stats,
+    }
 });
+
+/// Returns a list of stack IDs (stack_hash, bytes_allocated) in order from highest
+/// number of bytes allocated to lowest
+fn stack_list_allocated_bytes_desc() -> Vec<(u64, u64)> {
+    let mut items = Vec::new();
+    for entry in &TAI_STATE.stack_stats {
+        items.push((*entry.key(), entry.value().allocated_bytes));
+    }
+    items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    items
+}
 
 // NOTE: The creation of state in this TL must NOT allocate. Otherwise it will cause
 // the profiler code to go into an endless loop.
@@ -148,23 +173,28 @@ unsafe impl GlobalAlloc for TaiAllocator {
                         // This drop is important for re-entry purposes
                         drop(state);
 
-                        PROFILED.fetch_add(1, SeqCst);
+                        PROFILED.fetch_add(layout.size(), SeqCst);
 
                         // -- Beginning of section that may allocate
                         // 1. Get unresolved backtrace for speed
                         let mut bt = Backtrace::new_unresolved();
 
                         // 2. Create a Callstack, check if there is a similar stack
-                        let stack = Callstack::<{ MAX_NUM_FRAMES }>::from_backtrace_unresolved(&bt);
+                        let stack = StdCallstack::from_backtrace_unresolved(&bt);
                         let stack_hash = stack.compute_hash();
-
-                        // 3. Resolve symbols if needed (if its a new stack)
-                        stack.populate_symbol_map(&mut bt, &TAI_STATE.symbol_map);
-
-                        // 4. Update stats
-                        //
-                        // XXX: print stuff out
-                        println!("{}", stack.with_symbols(&TAI_STATE.symbol_map));
+                        TAI_STATE
+                            .stack_stats
+                            .entry(stack_hash)
+                            .and_modify(|stats| {
+                                // 4. Update stats
+                                stats.num_allocations += 1;
+                                stats.allocated_bytes += layout.size() as u64;
+                            })
+                            .or_insert_with(|| {
+                                // 3. Resolve symbols if needed (new stack entry)
+                                stack.populate_symbol_map(&mut bt, &TAI_STATE.symbol_map);
+                                StackStats::new(stack, Some(layout.size() as u64))
+                            });
 
                         // -- End of core profiling section, no more allocations --
                         tl_state.borrow_mut().0 = false;

@@ -8,12 +8,15 @@ use super::*;
 
 pub(crate) const MAX_NUM_FRAMES: usize = 30;
 
+pub type StdCallstack = Callstack<MAX_NUM_FRAMES>;
+
 /// An optimized Callstack struct that represents a single stack trace.
 /// No symbols are explicitly held here - the major savings is that
 /// we use an external dictionary to store symbols, because the same IPs
 /// are used over and over in many stack traces.
 ///
 /// To reduce allocations, we only keep MAX_NUM_FRAMES frames.
+#[derive(Debug, Clone)]
 pub struct Callstack<const NF: usize> {
     frames: [u64; NF],
 }
