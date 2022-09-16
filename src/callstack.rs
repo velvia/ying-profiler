@@ -65,29 +65,60 @@ impl<const NF: usize> Callstack<NF> {
         }
     }
 
-    /// Obtains a CallbackWithSymbols for display.
+    /// Obtains a DecoratedCallstack for display.
     /// `println!("{}", cb.with_symbols(symbols));`
     pub fn with_symbols<'s, 'm>(
         &'s self,
         symbols: &'m SymbolMap,
-    ) -> CallstackWithSymbols<'s, 'm, NF> {
-        CallstackWithSymbols { cb: self, symbols }
+    ) -> DecoratedCallstack<'s, 'm, NF> {
+        DecoratedCallstack {
+            cb: self,
+            symbols,
+            filename_info: false,
+            filter_poll: true,
+        }
+    }
+
+    /// Obtains a DecoratedCallstack for display with both symbol and filename/lineno info.
+    /// `println!("{}", cb.with_symbols_and_filename(symbols));`
+    pub fn with_symbols_and_filename<'s, 'm>(
+        &'s self,
+        symbols: &'m SymbolMap,
+    ) -> DecoratedCallstack<'s, 'm, NF> {
+        DecoratedCallstack {
+            cb: self,
+            symbols,
+            filename_info: true,
+            filter_poll: true,
+        }
     }
 }
 
-pub struct CallstackWithSymbols<'cb, 's, const NF: usize> {
+pub struct DecoratedCallstack<'cb, 's, const NF: usize> {
     cb: &'cb Callstack<NF>,
     symbols: &'s SymbolMap,
+    filename_info: bool,
+    filter_poll: bool,
 }
 
-impl<'cb, 's, const NF: usize> fmt::Display for CallstackWithSymbols<'cb, 's, NF> {
+impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Callback <hash = 0x{:0x}>", self.cb.compute_hash())?;
         for ip in &self.cb.frames {
             if let Some(frame) = self.symbols.get(ip) {
-                writeln!(f, "  {}", stringify_symbol(&frame.symbols()[0]))?;
-                for s in &frame.symbols()[1..] {
-                    writeln!(f, "    > {}", stringify_symbol(s))?;
+                writeln!(
+                    f,
+                    "  {}",
+                    stringify_symbol(&frame.symbols()[0], self.filename_info)
+                )?;
+                if self.filter_poll {
+                    for s in filtered_symbols_iter(&frame.symbols()[1..]) {
+                        writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
+                    }
+                } else {
+                    for s in &frame.symbols()[1..] {
+                        writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
+                    }
                 }
             }
         }
@@ -95,19 +126,23 @@ impl<'cb, 's, const NF: usize> fmt::Display for CallstackWithSymbols<'cb, 's, NF
     }
 }
 
-fn stringify_symbol(s: &BacktraceSymbol) -> String {
-    format!(
-        "{} ({:?}:{})",
-        s.name().expect("No symbol!"),
-        s.filename().unwrap_or_else(|| std::path::Path::new("")),
-        s.lineno().unwrap_or(0)
-    )
+fn stringify_symbol(s: &BacktraceSymbol, include_filename: bool) -> String {
+    if include_filename {
+        format!(
+            "{}\n\t({:?}:{})",
+            s.name().expect("No symbol!"),
+            s.filename().unwrap_or_else(|| std::path::Path::new("")),
+            s.lineno().unwrap_or(0)
+        )
+    } else {
+        format!("{}", s.name().expect("No symbol!"))
+    }
 }
 
 /// Filter the symbols in a BacktraceFrame, returning an iterator.
 /// Right now just filters out poll() calls.
-fn filtered_symbols_iter(frame: &BacktraceFrame) -> impl Iterator<Item = &BacktraceSymbol> {
-    frame.symbols().iter().filter(|&s| {
+fn filtered_symbols_iter(symbols: &[BacktraceSymbol]) -> impl Iterator<Item = &BacktraceSymbol> {
+    symbols.iter().filter(|&s| {
         if let Some(symbol_name) = s.name() {
             let demangled = format!("{:?}", symbol_name);
             !demangled.contains("Future>::poll::")

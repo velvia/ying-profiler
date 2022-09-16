@@ -35,6 +35,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::time::Duration;
 
 use backtrace::{Backtrace, BacktraceFrame};
 use dashmap::DashMap;
@@ -81,22 +82,24 @@ impl TaiAllocator {
     /// Dumps out a report on the top k stack traces by bytes allocated
     pub fn print_top_k_stacks_by_bytes(k: usize) {
         let total_profiled_bytes = PROFILED.load(SeqCst);
-        let stacks_by_alloc = stack_list_allocated_bytes_desc();
-        stacks_by_alloc
-            .iter()
-            .take(k)
-            .for_each(|&(stack_hash, bytes_allocated)| {
-                let stats = TAI_STATE
-                    .stack_stats
-                    .get(&stack_hash)
-                    .expect("Did stats get removed?");
-                let pct = (bytes_allocated as f64) * 100.0 / (total_profiled_bytes as f64);
-                println!(
-                    "\n---\n{} bytes allocated ({pct:.2}%) ({} allocations)",
-                    stats.allocated_bytes, stats.num_allocations
-                );
-                println!("{}", stats.stack.with_symbols(&TAI_STATE.symbol_map));
-            })
+        lock_out_profiler(|| {
+            let stacks_by_alloc = stack_list_allocated_bytes_desc();
+            stacks_by_alloc
+                .iter()
+                .take(k)
+                .for_each(|&(stack_hash, bytes_allocated)| {
+                    // Clone the value so we don't hang on to the reference.  This
+                    // is important to avoid hanging on to reference across allocations
+                    // which might create deadlocks
+                    let stats = get_stats_for_stack_hash(stack_hash);
+                    let pct = (bytes_allocated as f64) * 100.0 / (total_profiled_bytes as f64);
+                    println!(
+                        "\n---\n{} bytes allocated ({pct:.2}%) ({} allocations)",
+                        stats.allocated_bytes, stats.num_allocations
+                    );
+                    println!("{}", stats.stack.with_symbols(&TAI_STATE.symbol_map));
+                })
+        })
     }
 }
 
@@ -135,6 +138,15 @@ static TAI_STATE: Lazy<TaiState> = Lazy::new(|| {
     }
 });
 
+fn get_stats_for_stack_hash(stack_hash: u64) -> StackStats {
+    TAI_STATE
+        .stack_stats
+        .get(&stack_hash)
+        .expect("Did stats get removed?")
+        .value()
+        .clone()
+}
+
 /// Returns a list of stack IDs (stack_hash, bytes_allocated) in order from highest
 /// number of bytes allocated to lowest
 fn stack_list_allocated_bytes_desc() -> Vec<(u64, u64)> {
@@ -150,6 +162,24 @@ fn stack_list_allocated_bytes_desc() -> Vec<(u64, u64)> {
 // the profiler code to go into an endless loop.
 thread_local! {
     static PROFILER_TL: RefCell<(bool, SmallRng)> = RefCell::new((false, SmallRng::from_entropy()));
+}
+
+/// Locks the profiler flag so that allocations are not profiled.
+/// This is for non-profiler code such as debug prints that has to access the Dashmap or state
+/// and could potentially cause deadlock problems with Dashmap for example.
+fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
+    PROFILER_TL.with(|tl_state| {
+        // Within the same thread, nobody else should be holding the profiler lock here,
+        // but we'll check just to be sure
+        while tl_state.borrow().0 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        tl_state.borrow_mut().0 = true;
+        let return_val = func();
+        tl_state.borrow_mut().0 = false;
+        return_val
+    })
 }
 
 unsafe impl GlobalAlloc for TaiAllocator {
