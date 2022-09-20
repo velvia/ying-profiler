@@ -1,7 +1,10 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hasher;
 
 use backtrace::BacktraceSymbol;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use wyhash::WyHash;
 
 use super::*;
@@ -59,8 +62,9 @@ impl<const NF: usize> Callstack<NF> {
                 }
                 let frame = &bt.frames()[i + TOP_FRAMES_TO_SKIP];
 
-                // Clone backtrace and add it to symbol map
-                symbol_map.insert(*ip, frame.clone());
+                // Convert frame symbols into FriendlySymbols and add to symbol map
+                let friendlies = frame.symbols().iter().map(FriendlySymbol::from).collect();
+                symbol_map.insert(*ip, friendlies);
             }
         }
     }
@@ -105,18 +109,14 @@ impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Callback <hash = 0x{:0x}>", self.cb.compute_hash())?;
         for ip in &self.cb.frames {
-            if let Some(frame) = self.symbols.get(ip) {
-                writeln!(
-                    f,
-                    "  {}",
-                    stringify_symbol(&frame.symbols()[0], self.filename_info)
-                )?;
-                if self.filter_poll {
-                    for s in filtered_symbols_iter(&frame.symbols()[1..]) {
-                        writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
-                    }
-                } else {
-                    for s in &frame.symbols()[1..] {
+            if let Some(symbols) = self.symbols.get(ip) {
+                writeln!(f, "  {}", stringify_symbol(&symbols[0], self.filename_info))?;
+                // Don't expand inlined `::poll::` subcalls, they aren't interesting
+                if !symbols[0].is_poll {
+                    for s in &symbols[1..] {
+                        if self.filter_poll && s.is_poll {
+                            continue;
+                        }
                         writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
                     }
                 }
@@ -126,28 +126,88 @@ impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> 
     }
 }
 
-fn stringify_symbol(s: &BacktraceSymbol, include_filename: bool) -> String {
+fn stringify_symbol(s: &FriendlySymbol, include_filename: bool) -> String {
     if include_filename {
         format!(
             "{}\n\t({:?}:{})",
-            s.name().expect("No symbol!"),
-            s.filename().unwrap_or_else(|| std::path::Path::new("")),
-            s.lineno().unwrap_or(0)
+            s.friendly_name, s.shorter_filename, s.line_no
         )
     } else {
-        format!("{}", s.name().expect("No symbol!"))
+        s.friendly_name.to_string()
     }
 }
 
-/// Filter the symbols in a BacktraceFrame, returning an iterator.
-/// Right now just filters out poll() calls.
-fn filtered_symbols_iter(symbols: &[BacktraceSymbol]) -> impl Iterator<Item = &BacktraceSymbol> {
-    symbols.iter().filter(|&s| {
-        if let Some(symbol_name) = s.name() {
-            let demangled = format!("{:?}", symbol_name);
-            !demangled.contains("Future>::poll::")
+struct SymbolRegexes {
+    name_end_re: Regex,
+    // List of common patterns in filenames that can be shortened
+    filename_res: Vec<(Regex, &'static str)>,
+}
+
+static SYMBOL_REGEXES: Lazy<SymbolRegexes> = Lazy::new(|| {
+    let filename_res = vec![
+        (Regex::new(r"^/rustc/\w+/library/").unwrap(), "RUST:"),
+        (
+            Regex::new(r"^/Users/\w+/.cargo/registry/src/github.com-\w+/").unwrap(),
+            "Cargo:",
+        ),
+        (
+            Regex::new(r"^/home/\w+/.cargo/registry/src/github.com-\w+/").unwrap(),
+            "Cargo:",
+        ),
+    ];
+    SymbolRegexes {
+        name_end_re: Regex::new(r"(::\w+)$").expect("Error constructing regex"),
+        filename_res,
+    }
+});
+
+/// A wrapper around BacktraceSymbol with cleaned up, demangled symbol names
+/// and shortened filename and line number as well.
+///
+/// The shorter filename has common patterns like /Users/*/.cargo/registry/src/github.com-..../
+/// and /rustc/..../library substituted out for better readability.
+pub struct FriendlySymbol {
+    friendly_name: String,
+    is_poll: bool,
+    shorter_filename: String,
+    line_no: u32,
+}
+
+impl From<&BacktraceSymbol> for FriendlySymbol {
+    fn from(s: &BacktraceSymbol) -> Self {
+        // Get demangled name and strip the final ::<hex>
+        let demangled = format!("{}", s.name().expect("Name should exist"));
+        let friendly_name = SYMBOL_REGEXES
+            .name_end_re
+            .replace(&demangled, "")
+            .into_owned();
+
+        let is_poll = demangled.contains("::poll::");
+
+        // Get filename and convert common patterns
+        let shorter_filename = if let Some(p) = s.filename() {
+            let filename = p.to_str().expect("Cannot convert path to string");
+            let mut new_filename = None;
+            for (re, abbrev) in &SYMBOL_REGEXES.filename_res {
+                let replaced = re.replace(filename, *abbrev);
+                if let Cow::Owned(_) = replaced {
+                    // This means string was replaced
+                    new_filename = Some(replaced.into_owned());
+                    break;
+                }
+            }
+            new_filename.unwrap_or_else(|| filename.to_owned())
         } else {
-            false
+            String::new()
+        };
+
+        let line_no = s.lineno().unwrap_or(0);
+
+        Self {
+            friendly_name,
+            is_poll,
+            shorter_filename,
+            line_no,
         }
-    })
+    }
 }

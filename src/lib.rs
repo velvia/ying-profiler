@@ -37,14 +37,14 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::time::Duration;
 
-use backtrace::{Backtrace, BacktraceFrame};
+use backtrace::Backtrace;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
 
 pub mod callstack;
-use callstack::StdCallstack;
+use callstack::{FriendlySymbol, StdCallstack};
 
 /// Allocation sampling ratio.  Eg: 500 means 1 in 500 allocations are sampled.
 const DEFAULT_SAMPLING_RATIO: u32 = 500;
@@ -56,7 +56,7 @@ const DEFAULT_SAMPLING_RATIO: u32 = 500;
 const TOP_FRAMES_TO_SKIP: usize = 4;
 
 // A map for caching symbols in backtraces so we can mostly store u64's
-type SymbolMap = DashMap<u64, BacktraceFrame>;
+type SymbolMap = DashMap<u64, Vec<FriendlySymbol>>;
 
 /// Tai is a memory profiling Allocator wrapper.
 /// Tai is the Swahili word for an eagle.
@@ -80,7 +80,8 @@ impl TaiAllocator {
     }
 
     /// Dumps out a report on the top k stack traces by bytes allocated
-    pub fn print_top_k_stacks_by_bytes(k: usize) {
+    /// Defaults to symbols only, but with_filenames causes filenames/line#'s to be printed
+    pub fn print_top_k_stacks_by_bytes(k: usize, with_filenames: bool) {
         let total_profiled_bytes = PROFILED.load(SeqCst);
         lock_out_profiler(|| {
             let stacks_by_alloc = stack_list_allocated_bytes_desc();
@@ -97,7 +98,12 @@ impl TaiAllocator {
                         "\n---\n{} bytes allocated ({pct:.2}%) ({} allocations)",
                         stats.allocated_bytes, stats.num_allocations
                     );
-                    println!("{}", stats.stack.with_symbols(&TAI_STATE.symbol_map));
+                    let decorated_stack = if with_filenames {
+                        stats.stack.with_symbols_and_filename(&TAI_STATE.symbol_map)
+                    } else {
+                        stats.stack.with_symbols(&TAI_STATE.symbol_map)
+                    };
+                    println!("{}", decorated_stack);
                 })
         })
     }

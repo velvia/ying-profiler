@@ -35,7 +35,8 @@ async fn cache_update_loop() {
         TaiAllocator::profiled_bytes()
     );
     println!("Size of symbol map: {}", TaiAllocator::symbol_map_size());
-    TaiAllocator::print_top_k_stacks_by_bytes(10);
+    // Try changing last param with_filename to false to leave out filenames
+    TaiAllocator::print_top_k_stacks_by_bytes(10, true);
 }
 
 async fn insert_one(cache: &mut Cache<String, String>, s: String) {
