@@ -13,4 +13,4 @@ Target features:
 * Support for detecting leaks or large amounts of allocated memory that has not been freed
 * Generation of easy to read flamegraphs
 
-`cargo run --example ying_example`
+`cargo run --profile bench --features profile-spans --example ying_example`

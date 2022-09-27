@@ -32,6 +32,11 @@
 //! A generic tool which just examines the IP and tries to figure out a single symbol would miss out on all of the
 //! inlined symbols.  Some tools can expand on symbols, but the results still aren't very good.
 //!
+//! ## Tracing support
+//!
+//! To add support for memory profiling of [tracing Spans](https://docs.rs/tracing/0.1.36/tracing/struct.Span.html),
+//! enable the `profile-spans` feature of this crate.  Span information will be recorded.
+//!
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -98,6 +103,10 @@ impl YingProfiler {
                         "\n---\n{} bytes allocated ({pct:.2}%) ({} allocations)",
                         stats.allocated_bytes, stats.num_allocations
                     );
+                    #[cfg(feature = "profile-spans")]
+                    if !stats.span.is_disabled() {
+                        println!("\ttracing span id: {:?}", stats.span.id());
+                    }
                     let decorated_stack = if with_filenames {
                         stats
                             .stack
@@ -117,6 +126,8 @@ struct StackStats {
     stack: StdCallstack,
     allocated_bytes: u64,
     num_allocations: u64,
+    #[cfg(feature = "profile-spans")]
+    span: tracing::Span,
 }
 
 impl StackStats {
@@ -125,6 +136,8 @@ impl StackStats {
             stack,
             allocated_bytes: initial_alloc_bytes.unwrap_or(0),
             num_allocations: initial_alloc_bytes.map(|_| 1).unwrap_or(0),
+            #[cfg(feature = "profile-spans")]
+            span: tracing::Span::current(),
         }
     }
 }

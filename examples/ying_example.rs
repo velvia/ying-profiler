@@ -6,12 +6,17 @@ use async_backtrace_test::YingProfiler;
 use moka::sync::Cache;
 use rand::distributions::Alphanumeric;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
+#[cfg(feature = "profile-spans")]
+use tracing::instrument;
 
 #[global_allocator]
 static YING_ALLOC: YingProfiler = YingProfiler;
 
 #[tokio::main]
 async fn main() {
+    // Sorry this is a dev dependency only, cannot be optional
+    tracing_subscriber::fmt::init();
+
     cache_update_loop().await;
 }
 
@@ -39,6 +44,14 @@ async fn cache_update_loop() {
     YingProfiler::print_top_k_stacks_by_bytes(10, false);
 }
 
+#[cfg(feature = "profile-spans")]
+#[instrument(level = "info", skip_all)]
+async fn insert_one(cache: &mut Cache<String, String>, s: String) {
+    // Another allocation here
+    cache.insert(s.clone(), s);
+}
+
+#[cfg(not(feature = "profile-spans"))]
 async fn insert_one(cache: &mut Cache<String, String>, s: String) {
     // Another allocation here
     cache.insert(s.clone(), s);
