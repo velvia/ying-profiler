@@ -18,14 +18,14 @@
 //! If we use the backtrace crate and analyze release/bench backtraces in detail, we can see why that is.
 //! The Rust compiler does a good job of inlining function calls - even ones across async/await boundaries -
 //! in release code.  Thus, for a single instruction pointer (IP) in the stack trace, it might correspond to
-//! many different places in the code.  This is from `examples/tai_example.rs`:
+//! many different places in the code.  This is from `examples/ying_example.rs`:
 //!
 //! ```
-//! Some(tai_example::insert_one::{{closure}}::h7eddb5f8ebb3289b)
+//! Some(ying_example::insert_one::{{closure}}::h7eddb5f8ebb3289b)
 //!  > Some(<core::future::from_generator::GenFuture<T> as core::future::future::Future>::poll::h7a53098577c44da0)
-//!  > Some(tai_example::cache_update_loop::{{closure}}::h38556c7e7ae06bfa)
+//!  > Some(ying_example::cache_update_loop::{{closure}}::h38556c7e7ae06bfa)
 //!  > Some(<core::future::from_generator::GenFuture<T> as core::future::future::Future>::poll::hd319a0f603a1d426)
-//!  > Some(tai_example::main::{{closure}}::h33aa63760e836e2f)
+//!  > Some(ying_example::main::{{closure}}::h33aa63760e836e2f)
 //!  > Some(<core::future::from_generator::GenFuture<T> as core::future::future::Future>::poll::hb2fd3cb904946c24)
 //! ```
 //!
@@ -58,14 +58,14 @@ const TOP_FRAMES_TO_SKIP: usize = 4;
 // A map for caching symbols in backtraces so we can mostly store u64's
 type SymbolMap = DashMap<u64, Vec<FriendlySymbol>>;
 
-/// Tai is a memory profiling Allocator wrapper.
-/// Tai is the Swahili word for an eagle.
-pub struct TaiAllocator;
+/// Ying is a memory profiling Allocator wrapper.
+/// Ying is the Chinese word for an eagle.
+pub struct YingProfiler;
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static PROFILED: AtomicUsize = AtomicUsize::new(0);
 
-impl TaiAllocator {
+impl YingProfiler {
     pub fn total_allocated() -> usize {
         ALLOCATED.load(SeqCst)
     }
@@ -76,7 +76,7 @@ impl TaiAllocator {
     }
 
     pub fn symbol_map_size() -> usize {
-        TAI_STATE.symbol_map.len()
+        YING_STATE.symbol_map.len()
     }
 
     /// Dumps out a report on the top k stack traces by bytes allocated
@@ -99,9 +99,11 @@ impl TaiAllocator {
                         stats.allocated_bytes, stats.num_allocations
                     );
                     let decorated_stack = if with_filenames {
-                        stats.stack.with_symbols_and_filename(&TAI_STATE.symbol_map)
+                        stats
+                            .stack
+                            .with_symbols_and_filename(&YING_STATE.symbol_map)
                     } else {
-                        stats.stack.with_symbols(&TAI_STATE.symbol_map)
+                        stats.stack.with_symbols(&YING_STATE.symbol_map)
                     };
                     println!("{}", decorated_stack);
                 })
@@ -127,25 +129,25 @@ impl StackStats {
     }
 }
 
-// Private state.  We can't put this in the main TaiAllocator struct as that one has to be const static
-struct TaiState {
+// Private state.  We can't put this in the main YingProfiler struct as that one has to be const static
+struct YingState {
     symbol_map: SymbolMap,
     // Main map of stack hash to StackStats
     stack_stats: DashMap<u64, StackStats>,
 }
 
 // lazily initialized global state
-static TAI_STATE: Lazy<TaiState> = Lazy::new(|| {
+static YING_STATE: Lazy<YingState> = Lazy::new(|| {
     let symbol_map = SymbolMap::with_capacity(1000);
     let stack_stats = DashMap::with_capacity(1000);
-    TaiState {
+    YingState {
         symbol_map,
         stack_stats,
     }
 });
 
 fn get_stats_for_stack_hash(stack_hash: u64) -> StackStats {
-    TAI_STATE
+    YING_STATE
         .stack_stats
         .get(&stack_hash)
         .expect("Did stats get removed?")
@@ -157,7 +159,7 @@ fn get_stats_for_stack_hash(stack_hash: u64) -> StackStats {
 /// number of bytes allocated to lowest
 fn stack_list_allocated_bytes_desc() -> Vec<(u64, u64)> {
     let mut items = Vec::new();
-    for entry in &TAI_STATE.stack_stats {
+    for entry in &YING_STATE.stack_stats {
         items.push((*entry.key(), entry.value().allocated_bytes));
     }
     items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
@@ -188,7 +190,7 @@ fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
     })
 }
 
-unsafe impl GlobalAlloc for TaiAllocator {
+unsafe impl GlobalAlloc for YingProfiler {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // NOTE: the code between here and the state.0 = true must be re-entrant
         // and therefore not allocate, otherwise there will be an infinite loop.
@@ -218,7 +220,7 @@ unsafe impl GlobalAlloc for TaiAllocator {
                         // 2. Create a Callstack, check if there is a similar stack
                         let stack = StdCallstack::from_backtrace_unresolved(&bt);
                         let stack_hash = stack.compute_hash();
-                        TAI_STATE
+                        YING_STATE
                             .stack_stats
                             .entry(stack_hash)
                             .and_modify(|stats| {
@@ -228,7 +230,7 @@ unsafe impl GlobalAlloc for TaiAllocator {
                             })
                             .or_insert_with(|| {
                                 // 3. Resolve symbols if needed (new stack entry)
-                                stack.populate_symbol_map(&mut bt, &TAI_STATE.symbol_map);
+                                stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
                                 StackStats::new(stack, Some(layout.size() as u64))
                             });
 

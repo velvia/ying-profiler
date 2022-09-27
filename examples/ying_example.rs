@@ -1,14 +1,14 @@
-/// Example of using TaiAllocator.  Just creates some strings and inserts them into a hashmap.
+/// Example of using YingAllocator.  Just creates some strings and inserts them into a hashmap.
 ///
 /// We should see about even split in allocations between cache_update_loop() and insert_one()
 ///
-use async_backtrace_test::TaiAllocator;
+use async_backtrace_test::YingProfiler;
 use moka::sync::Cache;
 use rand::distributions::Alphanumeric;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 #[global_allocator]
-static TAI_ALLOC: TaiAllocator = TaiAllocator;
+static YING_ALLOC: YingProfiler = YingProfiler;
 
 #[tokio::main]
 async fn main() {
@@ -28,15 +28,15 @@ async fn cache_update_loop() {
     // Dump out how much has been allocated so far
     println!(
         "\nTotal bytes allocated: {}",
-        TaiAllocator::total_allocated()
+        YingProfiler::total_allocated()
     );
     println!(
         "Profiled bytes allocated: {}",
-        TaiAllocator::profiled_bytes()
+        YingProfiler::profiled_bytes()
     );
-    println!("Size of symbol map: {}", TaiAllocator::symbol_map_size());
+    println!("Size of symbol map: {}", YingProfiler::symbol_map_size());
     // Try changing last param with_filename to false to leave out filenames
-    TaiAllocator::print_top_k_stacks_by_bytes(10, true);
+    YingProfiler::print_top_k_stacks_by_bytes(10, false);
 }
 
 async fn insert_one(cache: &mut Cache<String, String>, s: String) {
