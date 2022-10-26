@@ -1,5 +1,5 @@
 [package]
-name = "async-backtrace-test"
+name = "ying-profiler"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 backtrace = "^0.3"
+coarsetime = "^0.1"
 dashmap = "5.4"
 once_cell = "1.14"
 rand = { version = "0.8", features = ["small_rng"] }  # no-std, so no allocation

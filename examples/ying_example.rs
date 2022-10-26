@@ -1,13 +1,13 @@
-/// Example of using YingAllocator.  Just creates some strings and inserts them into a hashmap.
-///
-/// We should see about even split in allocations between cache_update_loop() and insert_one()
-///
-use async_backtrace_test::YingProfiler;
 use moka::sync::Cache;
 use rand::distributions::Alphanumeric;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 #[cfg(feature = "profile-spans")]
 use tracing::instrument;
+/// Example of using YingAllocator.  Just creates some strings and inserts them into a hashmap.
+///
+/// We should see about even split in allocations between cache_update_loop() and insert_one()
+///
+use ying_profiler::YingProfiler;
 
 #[global_allocator]
 static YING_ALLOC: YingProfiler = YingProfiler;
@@ -40,8 +40,11 @@ async fn cache_update_loop() {
         YingProfiler::profiled_bytes()
     );
     println!("Size of symbol map: {}", YingProfiler::symbol_map_size());
-    // Try changing last param with_filename to false to leave out filenames
-    YingProfiler::print_top_k_stacks_by_bytes(10, false);
+    // Try changing last param with_filename to true to print out filenames
+    let top_stacks = YingProfiler::top_k_stacks_by_allocated(10);
+    for s in &top_stacks {
+        println!("---\n{}\n", s.rich_report(false));
+    }
 }
 
 #[cfg(feature = "profile-spans")]

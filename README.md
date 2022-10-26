@@ -13,4 +13,36 @@ Target features:
 * Support for detecting leaks or large amounts of allocated memory that has not been freed
 * Generation of easy to read flamegraphs
 
+To see an example which uses Ying and dumps out top stack traces by allocations:
+
 `cargo run --profile bench --features profile-spans --example ying_example`
+
+## How to use
+
+```rust
+use ying_profiler::YingProfiler;
+
+#[global_allocator]
+static YING_ALLOC: YingProfiler = YingProfiler;
+```
+
+TODO: How to dump out profiling info
+
+## Feature Flags
+
+## Roadmap
+
+0.1.0:
+- Track span information (need feature XXYY) in stacks
+- Track retained memory
+- Get top stack traces by total allocation
+- TODO: get top traces by retained allocation
+- TODO: include utility to spin up thread to print out stuff every N minutes, maybe only if memory goes up significantly?
+- TODO:
+
+Future:
+- TODO: Track how long lived allocations are (histogram?)
+- TODO: dump out flamegraphs
+- TODO: dump out profiles to local files, separate CLI or utility to analyze them?
+- TOOD: Ability to regularly trim or reset state, to avoid using up too much memory.  eg., long lived allocations that don't get released should just be removed from the outstanding_allocs map.
+- Only keep the top stack traces (say top 500) by various criteria
