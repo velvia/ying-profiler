@@ -364,7 +364,70 @@ unsafe impl GlobalAlloc for YingProfiler {
         }
     }
 
-    // TODO: implement custom realloc().  We must count reallocs as the same allocation, but need to do
+    // We implement a custom realloc().  We must count reallocs as the same allocation, but need to do
     // the following: - update original allocated bytes (but not allocations); move outstanding_allocs
     // because the pointer moved, but preserve original starting timestamp.
+    // The above also saves us cycles from having to call alloc() and dealloc() separately.
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let old_size = layout.size();
+        // SAFETY: the caller must ensure that the `new_size` does not overflow.
+        // `layout.align()` comes from a `Layout` and is thus guaranteed to be valid.
+        let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+        // SAFETY: the caller must ensure that `new_layout` is greater than zero.
+        let new_ptr = System.alloc(new_layout);
+        if !new_ptr.is_null() {
+            // SAFETY: the previously allocated block cannot overlap the newly allocated block.
+            // The safety contract for `dealloc` must be upheld by the caller.
+            std::ptr::copy_nonoverlapping(ptr, new_ptr, std::cmp::min(old_size, new_size));
+            System.dealloc(ptr, layout);
+
+            // 1. Update global statistics
+            if new_size > old_size {
+                ALLOCATED.fetch_add(new_size - old_size, SeqCst);
+            } else {
+                ALLOCATED.fetch_sub(old_size - new_size, SeqCst);
+            }
+
+            // 2. IF the old pointer was in outstanding_allocs, move it and make a new entry,
+            //    keeping the old starting timestamp.  Also update stack stats.
+            if YING_STATE.outstanding_allocs.contains_key(&(ptr as u64)) {
+                PROFILER_TL.with(|tl_state| {
+                    // We do the following in two steps because we cannot borrow_mut() twice
+                    // if profiler code allocates
+                    if !tl_state.borrow().0 {
+                        let mut state = tl_state.borrow_mut();
+                        state.0 = true;
+                        // This drop is important for re-entry purposes
+                        drop(state);
+
+                        // -- Beginning of section that may allocate
+                        if let Some((_, (stack_hash, alloc_ts))) =
+                            YING_STATE.outstanding_allocs.remove(&(ptr as u64))
+                        {
+                            YING_STATE
+                                .outstanding_allocs
+                                .insert(new_ptr as u64, (stack_hash, alloc_ts));
+
+                            // Update memory profiling freed bytes stats
+                            YING_STATE
+                                .stack_stats
+                                .entry(stack_hash)
+                                .and_modify(|stats| {
+                                    if new_size > old_size {
+                                        stats.allocated_bytes += (new_size - old_size) as u64;
+                                    } else {
+                                        stats.allocated_bytes -= (old_size - new_size) as u64;
+                                    }
+                                    // Don't change number of allocations or frees
+                                });
+                        }
+
+                        // -- End of core profiling section, no more allocations --
+                        tl_state.borrow_mut().0 = false;
+                    }
+                });
+            }
+        }
+        new_ptr
+    }
 }
