@@ -51,6 +51,7 @@ use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
 
 pub mod callstack;
+pub mod utils;
 use callstack::{FriendlySymbol, StdCallstack};
 
 /// Allocation sampling ratio.  Eg: 500 means 1 in 500 allocations are sampled.

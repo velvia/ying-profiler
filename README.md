@@ -11,6 +11,7 @@ Target features:
 * Targets async Rust programs (especially Tokio apps that use tracing for instrumentation), so you know the stack traces will be useful
   - Specific support for tracing spans and finding allocations by span
 * Support for detecting leaks or large amounts of allocated memory that has not been freed
+  - Tracks realloc() calls as single long-lived allocation
 * Generation of easy to read flamegraphs
 
 To see an example which uses Ying and dumps out top stack traces by allocations:
@@ -34,11 +35,10 @@ TODO: How to dump out profiling info
 
 0.1.0:
 - Track span information (need feature XXYY) in stacks
-- Track retained memory
+- Track retained memory, including reallocs
 - Get top stack traces by total allocation
-- TODO: get top traces by retained allocation
-- TODO: include utility to spin up thread to print out stuff every N minutes, maybe only if memory goes up significantly?
-- TODO:
+- Get top traces by retained allocation
+- `ProfilerRunner` -- utility to spin up thread to print out stuff every N minutes when total memory usage changes significantly
 
 Future:
 - TODO: Track how long lived allocations are (histogram?)
