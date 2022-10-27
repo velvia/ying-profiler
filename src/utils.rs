@@ -75,8 +75,9 @@ impl ProfilerRunner {
 
                 // Threshold for change exceeded, do report
                 if (ratio.abs() * 100.0) >= report_pct_change_trigger as f64 {
-                    #[cfg(feature = "profile-spans")]
-                    info!(
+                    // #[cfg(feature = "profile-spans")]
+                    // info!(
+                    println!(
                         "Significant memory change registered, dumping profile: new = {}, old = {}",
                         new_allocated, last_retained_mem
                     );
