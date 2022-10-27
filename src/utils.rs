@@ -71,13 +71,11 @@ impl ProfilerRunner {
                     new_allocated,
                     ratio, "Ying: total allocated memory and ratio to last"
                 );
-                println!("Ying: total allocated memory now {} MB, before {} MB", new_allocated, last_retained_mem);
 
                 // Threshold for change exceeded, do report
                 if (ratio.abs() * 100.0) >= report_pct_change_trigger as f64 {
-                    // #[cfg(feature = "profile-spans")]
-                    // info!(
-                    println!(
+                    #[cfg(feature = "profile-spans")]
+                    info!(
                         "Significant memory change registered, dumping profile: new = {}, old = {}",
                         new_allocated, last_retained_mem
                     );
