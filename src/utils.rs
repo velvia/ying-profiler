@@ -2,6 +2,12 @@
 /// Most importantly, a ProfilerRunner that spawns a background thread that periodically
 /// 1. Dumps out top retained memory stats to both logs and disk
 /// 2. ???
+///
+/// To run:
+/// {{{
+///     use ying_profiler::utils::ProfilerRunner;
+///     ProfilerRunner::default().spawn();
+/// }}}
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;

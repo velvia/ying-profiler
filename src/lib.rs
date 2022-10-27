@@ -234,7 +234,11 @@ fn stack_list_retained_bytes_desc() -> Vec<(u64, u64)> {
     let mut items = Vec::new();
     // TODO: filter away entries with minimal retained allocations, say <1% or some threshold
     for entry in &YING_STATE.stack_stats {
-        let retained = entry.value().allocated_bytes - entry.value().freed_bytes;
+        // NOTE: saturating_sub here is really important, freed could be slightly bigger than allocated
+        let retained = entry
+            .value()
+            .allocated_bytes
+            .saturating_sub(entry.value().freed_bytes);
         items.push((*entry.key(), retained));
     }
     items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
