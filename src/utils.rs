@@ -71,6 +71,7 @@ impl ProfilerRunner {
                     new_allocated,
                     ratio, "Ying: total allocated memory and ratio to last"
                 );
+                println!("Ying: total allocated memory now {} MB, before {} MB", new_allocated, last_retained_mem);
 
                 // Threshold for change exceeded, do report
                 if (ratio.abs() * 100.0) >= report_pct_change_trigger as f64 {
@@ -91,7 +92,7 @@ impl ProfilerRunner {
                     // Formulate profiling filename based on ISO8601 timestamp and number of MBs
                     let dt = chrono::offset::Local::now();
                     let dt_str = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                    let dump_name = format!("ying.{}.{}MB.report", dt_str, new_allocated);
+                    let dump_name = format!("ying.{}.{}MB.report", dt_str, new_allocated as i64);
 
                     let mut report_path = reporting_path.clone();
                     report_path.push(dump_name);
