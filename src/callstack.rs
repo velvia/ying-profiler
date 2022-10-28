@@ -110,14 +110,16 @@ impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> 
         writeln!(f, "Callback <hash = 0x{:0x}>", self.cb.compute_hash())?;
         for ip in &self.cb.frames {
             if let Some(symbols) = self.symbols.get(ip) {
-                writeln!(f, "  {}", stringify_symbol(&symbols[0], self.filename_info))?;
-                // Don't expand inlined `::poll::` subcalls, they aren't interesting
-                if !symbols[0].is_poll {
-                    for s in &symbols[1..] {
-                        if self.filter_poll && s.is_poll {
-                            continue;
+                if !symbols.is_empty() {
+                    writeln!(f, "  {}", stringify_symbol(&symbols[0], self.filename_info))?;
+                    // Don't expand inlined `::poll::` subcalls, they aren't interesting
+                    if !symbols[0].is_poll {
+                        for s in &symbols[1..] {
+                            if self.filter_poll && s.is_poll {
+                                continue;
+                            }
+                            writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
                         }
-                        writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
                     }
                 }
             }

@@ -56,12 +56,16 @@ use callstack::{FriendlySymbol, StdCallstack};
 
 /// Allocation sampling ratio.  Eg: 500 means 1 in 500 allocations are sampled.
 const DEFAULT_SAMPLING_RATIO: u32 = 500;
+
 /// The number of frames at the top of the stack to skip.  Most of these have to do with
 /// backtrace and this profiler infrastructure.  This number needs to be adjusted
 /// depending on the implementation.
 /// For release/bench builds with debug = 1 / strip = none, this should be 4.
 /// For debug builds, this is about 9.
 const TOP_FRAMES_TO_SKIP: usize = 4;
+
+/// Prevent and dump stack trace for giant single allocations beyond a certain size
+const GIANT_SINGLE_ALLOC_LIMIT: usize = 64 * 1024 * 1024 * 1024;
 
 // A map for caching symbols in backtraces so we can mostly store u64's
 type SymbolMap = DashMap<u64, Vec<FriendlySymbol>>;
@@ -285,11 +289,39 @@ fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
     })
 }
 
+fn check_and_deny_giant_allocations(ptr: *mut u8, layout: Layout) -> *mut u8 {
+    if layout.size() >= GIANT_SINGLE_ALLOC_LIMIT {
+        // This is to make sure that YING_STATE is initialized already
+        let _ = YING_STATE.symbol_map.len();
+
+        // Prevent allocation sampling while we are telling the world who did this
+        lock_out_profiler(|| {
+            println!(
+                "WARNING: Huge memory allocation of {} bytes denied by Ying profiler",
+                layout.size()
+            );
+
+            let mut bt = Backtrace::new_unresolved();
+
+            // 2. Create a Callstack, check if there is a similar stack
+            let stack = StdCallstack::from_backtrace_unresolved(&bt);
+            stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
+            println!(
+                "Stack trace:\n{}",
+                stack.with_symbols_and_filename(&YING_STATE.symbol_map)
+            );
+        });
+        std::ptr::null_mut::<u8>()
+    } else {
+        ptr
+    }
+}
+
 unsafe impl GlobalAlloc for YingProfiler {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // NOTE: the code between here and the state.0 = true must be re-entrant
         // and therefore not allocate, otherwise there will be an infinite loop.
-        let alloc_ptr = System.alloc(layout);
+        let alloc_ptr = check_and_deny_giant_allocations(System.alloc(layout), layout);
         if !alloc_ptr.is_null() {
             ALLOCATED.fetch_add(layout.size(), SeqCst);
 
@@ -395,7 +427,7 @@ unsafe impl GlobalAlloc for YingProfiler {
         // `layout.align()` comes from a `Layout` and is thus guaranteed to be valid.
         let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
         // SAFETY: the caller must ensure that `new_layout` is greater than zero.
-        let new_ptr = System.alloc(new_layout);
+        let new_ptr = check_and_deny_giant_allocations(System.alloc(new_layout), new_layout);
         if !new_ptr.is_null() {
             // SAFETY: the previously allocated block cannot overlap the newly allocated block.
             // The safety contract for `dealloc` must be upheld by the caller.

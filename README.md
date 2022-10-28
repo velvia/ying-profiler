@@ -39,8 +39,10 @@ TODO: How to dump out profiling info
 - Get top stack traces by total allocation
 - Get top traces by retained allocation
 - `ProfilerRunner` -- utility to spin up thread to print out stuff every N minutes when total memory usage changes significantly
+- Catch and prevent single allocations greater than say 64GB, dump out giant allocation stack trace
 
 Future:
+- TODO: env var or struct configuration of profiler parameters
 - TODO: Track how long lived allocations are (histogram?)
 - TODO: dump out flamegraphs
 - TODO: dump out profiles to local files, separate CLI or utility to analyze them?

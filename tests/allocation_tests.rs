@@ -1,3 +1,4 @@
+use std::alloc::GlobalAlloc;
 use std::time::Duration;
 
 use ying_profiler::YingProfiler;
@@ -55,4 +56,17 @@ fn basic_allocation_free_test() {
     // Number of freed bytes should be roughly half
     assert!(stat.freed_bytes > 0);
     assert!(stat.retained_estimated_total() > 0);
+}
+
+#[test]
+fn test_giant_allocation() {
+    // We need to give some time for the profiler to start up
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Create an allocation that's way too giant.
+    let layout = std::alloc::Layout::from_size_align(128 * 1024 * 1024 * 1024, 8).unwrap();
+
+    // We should get back a null pointer so allocation should fail.
+    let ptr = unsafe { YingProfiler::alloc(&YingProfiler, layout) };
+    assert_eq!(ptr as u64, 0);
 }
