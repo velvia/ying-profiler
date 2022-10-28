@@ -40,7 +40,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::RefCell;
 use std::fmt::Write;
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
 use std::time::Duration;
 
 use backtrace::Backtrace;
@@ -75,20 +75,24 @@ static PROFILED: AtomicUsize = AtomicUsize::new(0);
 
 impl YingProfiler {
     /// Total outstanding bytes allocated (not just sampled but all allocations)
+    #[inline]
     pub fn total_allocated() -> usize {
-        ALLOCATED.load(SeqCst)
+        ALLOCATED.load(Relaxed)
     }
 
     /// Total bytes allocated for profiled allocations
+    #[inline]
     pub fn profiled_bytes() -> usize {
-        PROFILED.load(SeqCst)
+        PROFILED.load(Relaxed)
     }
 
+    #[inline]
     pub fn symbol_map_size() -> usize {
         YING_STATE.symbol_map.len()
     }
 
     /// Number of entries for outstanding sampled allocations map
+    #[inline]
     pub fn num_outstanding_allocs() -> usize {
         YING_STATE.outstanding_allocs.len()
     }
@@ -145,33 +149,50 @@ impl StackStats {
         }
     }
 
+    /// The number of "retained" bytes as seen by this profiler from sampling
+    pub fn retained_profiled_bytes(&self) -> u64 {
+        // NOTE: saturating_sub here is really important, freed could be slightly bigger than allocated
+        self.allocated_bytes.saturating_sub(self.freed_bytes)
+    }
+
+    /// Estimated total retained bytes based on sampling ratio
+    pub fn retained_estimated_total(&self) -> u64 {
+        self.retained_profiled_bytes() * (DEFAULT_SAMPLING_RATIO as u64)
+    }
+
     /// Create a rich multi-line report of this StackStats
     /// * filename - include source filename in stack trace
     pub fn rich_report(&self, with_filenames: bool) -> String {
-        let total_profiled_bytes = PROFILED.load(SeqCst);
+        let total_profiled_bytes = YingProfiler::profiled_bytes();
         let pct = (self.allocated_bytes as f64) * 100.0 / (total_profiled_bytes as f64);
         let mut report = format!(
-            "{} bytes allocated ({pct:.2}%) ({} allocations)\n",
+            "{} profiled bytes allocated ({pct:.2}%) ({} allocations)\n",
             self.allocated_bytes, self.num_allocations
         );
         let freed_pct = (self.freed_bytes as f64) * 100.0 / (self.allocated_bytes as f64);
-        writeln!(
+        let _ = writeln!(
             &mut report,
-            "  {} bytes freed ({freed_pct:.2}% of allocated) ({} frees)",
+            "  {} profiled bytes freed ({freed_pct:.2}% of allocated) ({} frees)",
             self.freed_bytes, self.num_frees
-        )
-        .unwrap();
+        );
+        let retained = self.retained_estimated_total();
+        let retained_pct = (retained as f64) * 100.0 / YingProfiler::total_allocated() as f64;
+        let _ = writeln!(
+            &mut report,
+            "  Estimated {} total bytes retained ({retained_pct:.2}% of total) ",
+            retained
+        );
 
         #[cfg(feature = "profile-spans")]
         if !self.span.is_disabled() {
-            writeln!(&mut report, "\ttracing span id: {:?}", self.span.id()).unwrap();
+            let _ = writeln!(&mut report, "\ttracing span id: {:?}", self.span.id());
         }
         let decorated_stack = if with_filenames {
             self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
         } else {
             self.stack.with_symbols(&YING_STATE.symbol_map)
         };
-        writeln!(&mut report, "{}", decorated_stack).unwrap();
+        let _ = writeln!(&mut report, "{}", decorated_stack);
         report
     }
 }
@@ -234,12 +255,7 @@ fn stack_list_retained_bytes_desc() -> Vec<(u64, u64)> {
     let mut items = Vec::new();
     // TODO: filter away entries with minimal retained allocations, say <1% or some threshold
     for entry in &YING_STATE.stack_stats {
-        // NOTE: saturating_sub here is really important, freed could be slightly bigger than allocated
-        let retained = entry
-            .value()
-            .allocated_bytes
-            .saturating_sub(entry.value().freed_bytes);
-        items.push((*entry.key(), retained));
+        items.push((*entry.key(), entry.value().retained_profiled_bytes()));
     }
     items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     items

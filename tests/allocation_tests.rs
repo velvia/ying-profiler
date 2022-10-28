@@ -54,4 +54,5 @@ fn basic_allocation_free_test() {
 
     // Number of freed bytes should be roughly half
     assert!(stat.freed_bytes > 0);
+    assert!(stat.retained_estimated_total() > 0);
 }
