@@ -216,6 +216,7 @@ struct YingState {
 static YING_STATE: Lazy<YingState> = Lazy::new(|| {
     // We need to disable the profiler in here as it could cause an endless loop otherwise trying to initialize
     PROFILER_TL.with(|tl_state| {
+        let orig_state = tl_state.borrow().0;
         tl_state.borrow_mut().0 = true;
 
         let symbol_map = SymbolMap::with_capacity(1000);
@@ -227,7 +228,7 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
             outstanding_allocs,
         };
 
-        tl_state.borrow_mut().0 = false;
+        tl_state.borrow_mut().0 = orig_state;
         s
     })
 });
@@ -447,7 +448,11 @@ unsafe impl GlobalAlloc for YingProfiler {
 
             // 2. IF the old pointer was in outstanding_allocs, move it and make a new entry,
             //    keeping the old starting timestamp.  Also update stack stats.
-            if YING_STATE.outstanding_allocs.contains_key(&(ptr as u64)) {
+            //    But only if state is alredy initialized - otherwise any state initialization that
+            //    results in a realloc() could cause this to infinite loop
+            if Lazy::get(&YING_STATE).is_some()
+                && YING_STATE.outstanding_allocs.contains_key(&(ptr as u64))
+            {
                 PROFILER_TL.with(|tl_state| {
                     // We do the following in two steps because we cannot borrow_mut() twice
                     // if profiler code allocates
