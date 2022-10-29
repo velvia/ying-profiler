@@ -290,10 +290,8 @@ fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
 }
 
 fn check_and_deny_giant_allocations(ptr: *mut u8, layout: Layout) -> *mut u8 {
-    if layout.size() >= GIANT_SINGLE_ALLOC_LIMIT {
-        // This is to make sure that YING_STATE is initialized already
-        let _ = YING_STATE.symbol_map.len();
-
+    // Sorry there is an edge case where this check cannot happen if YING is not initialized
+    if layout.size() >= GIANT_SINGLE_ALLOC_LIMIT && Lazy::get(&YING_STATE).is_some() {
         // Prevent allocation sampling while we are telling the world who did this
         lock_out_profiler(|| {
             println!(
@@ -381,6 +379,12 @@ unsafe impl GlobalAlloc for YingProfiler {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout);
         ALLOCATED.fetch_sub(layout.size(), SeqCst);
+
+        // Return immediately and skip rest of this if YING_STATE is not initialized.  It could cause
+        // an infinite loop because during initialization of YING_STATE, dealloc() could be then called
+        if Lazy::get(&YING_STATE).is_none() {
+            return;
+        }
 
         // If the allocation was recorded in outstanding_allocs, then remove it and update stats
         // about number of bytes freed etc.  Do this with protection to guard against possible re-entry.
