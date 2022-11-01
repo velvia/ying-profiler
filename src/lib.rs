@@ -189,12 +189,15 @@ impl StackStats {
         if !self.span.is_disabled() {
             let _ = writeln!(&mut report, "\ttracing span id: {:?}", self.span.id());
         }
-        let decorated_stack = if with_filenames {
-            self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
-        } else {
-            self.stack.with_symbols(&YING_STATE.symbol_map)
-        };
-        let _ = writeln!(&mut report, "{}", decorated_stack);
+
+        lock_out_profiler(|| {
+            let decorated_stack = if with_filenames {
+                self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
+            } else {
+                self.stack.with_symbols(&YING_STATE.symbol_map)
+            };
+            let _ = writeln!(&mut report, "{}", decorated_stack);
+        });
         report
     }
 }
@@ -306,6 +309,15 @@ impl YingThreadLocal {
         state.1 += 1; // update counter for next sampling
         counter % DEFAULT_SAMPLING_RATIO == 0
     }
+
+    // Resets counter to 0 to guarantee next call to alloc() will sample.  TESTING ONLY
+    fn test_only_reset_sampling_counter(&self) {
+        self.state.borrow_mut().1 = 0;
+    }
+}
+
+pub fn testing_only_guarantee_next_sample() {
+    PROFILER_TL.with(|tl| tl.test_only_reset_sampling_counter());
 }
 
 /// Locks the profiler flag so that allocations are not profiled.
