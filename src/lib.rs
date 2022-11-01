@@ -38,7 +38,7 @@
 //! enable the `profile-spans` feature of this crate.  Span information will be recorded.
 //!
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
 use std::time::Duration;
@@ -278,41 +278,42 @@ thread_local! {
 }
 
 /// A struct to provide a better API around the lock out profiler flag/re-entrancy plus sampling
+/// This is meant to be used ONLY in a thread-local and is definitely not multi-thread safe.
 struct YingThreadLocal {
-    // TODO: move this to two separate Cell's, might be faster?
-    state: RefCell<(bool, u32)>,
+    alloc_locked: Cell<bool>,
+    sample_count: Cell<u32>,
 }
 
 impl YingThreadLocal {
     fn new() -> Self {
         Self {
-            state: RefCell::new((false, 0)),
+            alloc_locked: Cell::new(false),
+            sample_count: Cell::new(0),
         }
     }
 
     fn is_allocator_locked(&self) -> bool {
-        self.state.borrow().0
+        self.alloc_locked.get()
     }
 
     fn set_allocator_lock(&self) {
-        self.state.borrow_mut().0 = true;
+        self.alloc_locked.set(true);
     }
 
     fn release_allocator_lock(&self) {
-        self.state.borrow_mut().0 = false;
+        self.alloc_locked.set(false);
     }
 
     /// Obtains the counter, checks for sampling ratio, and updates counter in one go
     fn should_sample(&self) -> bool {
-        let mut state = self.state.borrow_mut();
-        let counter = state.1;
-        state.1 += 1; // update counter for next sampling
+        let counter = self.sample_count.get();
+        self.sample_count.set(counter + 1); // update counter for next sampling
         counter % DEFAULT_SAMPLING_RATIO == 0
     }
 
     // Resets counter to 0 to guarantee next call to alloc() will sample.  TESTING ONLY
     fn test_only_reset_sampling_counter(&self) {
-        self.state.borrow_mut().1 = 0;
+        self.sample_count.set(0);
     }
 }
 
@@ -430,8 +431,6 @@ unsafe impl GlobalAlloc for YingProfiler {
         // about number of bytes freed etc.  Do this with protection to guard against possible re-entry.
         if YING_STATE.outstanding_allocs.contains_key(&(ptr as u64)) {
             PROFILER_TL.with(|tl_state| {
-                // We do the following in two steps because we cannot borrow_mut() twice
-                // if profiler code allocates
                 if !tl_state.is_allocator_locked() {
                     tl_state.set_allocator_lock();
 
@@ -490,8 +489,6 @@ unsafe impl GlobalAlloc for YingProfiler {
                 && YING_STATE.outstanding_allocs.contains_key(&(ptr as u64))
             {
                 PROFILER_TL.with(|tl_state| {
-                    // We do the following in two steps because we cannot borrow_mut() twice
-                    // if profiler code allocates
                     if !tl_state.is_allocator_locked() {
                         tl_state.set_allocator_lock();
 
