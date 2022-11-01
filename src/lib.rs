@@ -47,8 +47,6 @@ use backtrace::Backtrace;
 use coarsetime::Clock;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use rand::rngs::SmallRng;
-use rand::{RngCore, SeedableRng};
 
 pub mod callstack;
 pub mod utils;
@@ -216,8 +214,8 @@ struct YingState {
 static YING_STATE: Lazy<YingState> = Lazy::new(|| {
     // We need to disable the profiler in here as it could cause an endless loop otherwise trying to initialize
     PROFILER_TL.with(|tl_state| {
-        let orig_state = tl_state.borrow().0;
-        tl_state.borrow_mut().0 = true;
+        let was_locked = tl_state.is_allocator_locked();
+        tl_state.set_allocator_lock();
 
         let symbol_map = SymbolMap::with_capacity(1000);
         let stack_stats = DashMap::with_capacity(1000);
@@ -228,7 +226,9 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
             outstanding_allocs,
         };
 
-        tl_state.borrow_mut().0 = orig_state;
+        if !was_locked {
+            tl_state.release_allocator_lock();
+        }
         s
     })
 });
@@ -268,8 +268,44 @@ fn stack_list_retained_bytes_desc() -> Vec<(u64, u64)> {
 
 // NOTE: The creation of state in this TL must NOT allocate. Otherwise it will cause
 // the profiler code to go into an endless loop.
+// The u32 is used for allocation sampling. It starts at 0 so that even shorter lived threads
+// will at least get 1 allocation sampled.
 thread_local! {
-    static PROFILER_TL: RefCell<(bool, SmallRng)> = RefCell::new((false, SmallRng::from_entropy()));
+    static PROFILER_TL: YingThreadLocal = YingThreadLocal::new();
+}
+
+/// A struct to provide a better API around the lock out profiler flag/re-entrancy plus sampling
+struct YingThreadLocal {
+    // TODO: move this to two separate Cell's, might be faster?
+    state: RefCell<(bool, u32)>,
+}
+
+impl YingThreadLocal {
+    fn new() -> Self {
+        Self {
+            state: RefCell::new((false, 0)),
+        }
+    }
+
+    fn is_allocator_locked(&self) -> bool {
+        self.state.borrow().0
+    }
+
+    fn set_allocator_lock(&self) {
+        self.state.borrow_mut().0 = true;
+    }
+
+    fn release_allocator_lock(&self) {
+        self.state.borrow_mut().0 = false;
+    }
+
+    /// Obtains the counter, checks for sampling ratio, and updates counter in one go
+    fn should_sample(&self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let counter = state.1;
+        state.1 += 1; // update counter for next sampling
+        counter % DEFAULT_SAMPLING_RATIO == 0
+    }
 }
 
 /// Locks the profiler flag so that allocations are not profiled.
@@ -279,13 +315,13 @@ fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
     PROFILER_TL.with(|tl_state| {
         // Within the same thread, nobody else should be holding the profiler lock here,
         // but we'll check just to be sure
-        while tl_state.borrow().0 {
+        while tl_state.is_allocator_locked() {
             std::thread::sleep(Duration::from_millis(2));
         }
 
-        tl_state.borrow_mut().0 = true;
+        tl_state.set_allocator_lock();
         let return_val = func();
-        tl_state.borrow_mut().0 = false;
+        tl_state.release_allocator_lock();
         return_val
     })
 }
@@ -328,49 +364,40 @@ unsafe impl GlobalAlloc for YingProfiler {
             // Also, we set a ThreadLocal to avoid re-entry: ie the code below might allocate,
             // and we avoid profiling if we are already in the loop below.  Avoids cycles.
             PROFILER_TL.with(|tl_state| {
-                // We do the following in two steps because we cannot borrow_mut() twice
-                // if profiler code allocates
-                if !tl_state.borrow().0 {
-                    let mut state = tl_state.borrow_mut();
-                    if (state.1.next_u32() % DEFAULT_SAMPLING_RATIO) == 0 {
-                        state.0 = true;
-                        // This drop is important for re-entry purposes
-                        drop(state);
+                if !tl_state.is_allocator_locked() && tl_state.should_sample() {
+                    tl_state.set_allocator_lock();
 
-                        PROFILED.fetch_add(layout.size(), SeqCst);
+                    PROFILED.fetch_add(layout.size(), SeqCst);
 
-                        // -- Beginning of section that may allocate
-                        // 1. Get unresolved backtrace for speed
-                        let mut bt = Backtrace::new_unresolved();
+                    // -- Beginning of section that may allocate
+                    // 1. Get unresolved backtrace for speed
+                    let mut bt = Backtrace::new_unresolved();
 
-                        // 2. Create a Callstack, check if there is a similar stack
-                        let stack = StdCallstack::from_backtrace_unresolved(&bt);
-                        let stack_hash = stack.compute_hash();
-                        YING_STATE
-                            .stack_stats
-                            .entry(stack_hash)
-                            .and_modify(|stats| {
-                                // 4. Update stats
-                                stats.num_allocations += 1;
-                                stats.allocated_bytes += layout.size() as u64;
-                            })
-                            .or_insert_with(|| {
-                                // 3. Resolve symbols if needed (new stack entry)
-                                stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
-                                StackStats::new(stack, Some(layout.size() as u64))
-                            });
+                    // 2. Create a Callstack, check if there is a similar stack
+                    let stack = StdCallstack::from_backtrace_unresolved(&bt);
+                    let stack_hash = stack.compute_hash();
+                    YING_STATE
+                        .stack_stats
+                        .entry(stack_hash)
+                        .and_modify(|stats| {
+                            // 4. Update stats
+                            stats.num_allocations += 1;
+                            stats.allocated_bytes += layout.size() as u64;
+                        })
+                        .or_insert_with(|| {
+                            // 3. Resolve symbols if needed (new stack entry)
+                            stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
+                            StackStats::new(stack, Some(layout.size() as u64))
+                        });
 
-                        // 4. Record allocation so we can track outstanding vs transient allocs
-                        YING_STATE
-                            .outstanding_allocs
-                            .entry(alloc_ptr as u64)
-                            .or_insert_with(|| {
-                                (stack_hash, Clock::recent_since_epoch().as_millis())
-                            });
+                    // 4. Record allocation so we can track outstanding vs transient allocs
+                    YING_STATE
+                        .outstanding_allocs
+                        .entry(alloc_ptr as u64)
+                        .or_insert_with(|| (stack_hash, Clock::recent_since_epoch().as_millis()));
 
-                        // -- End of core profiling section, no more allocations --
-                        tl_state.borrow_mut().0 = false;
-                    }
+                    // -- End of core profiling section, no more allocations --
+                    tl_state.release_allocator_lock();
                 }
             })
         }
@@ -393,11 +420,8 @@ unsafe impl GlobalAlloc for YingProfiler {
             PROFILER_TL.with(|tl_state| {
                 // We do the following in two steps because we cannot borrow_mut() twice
                 // if profiler code allocates
-                if !tl_state.borrow().0 {
-                    let mut state = tl_state.borrow_mut();
-                    state.0 = true;
-                    // This drop is important for re-entry purposes
-                    drop(state);
+                if !tl_state.is_allocator_locked() {
+                    tl_state.set_allocator_lock();
 
                     // -- Beginning of section that may allocate
                     if let Some((_, (stack_hash, _alloc_ts))) =
@@ -416,7 +440,7 @@ unsafe impl GlobalAlloc for YingProfiler {
                     }
 
                     // -- End of core profiling section, no more allocations --
-                    tl_state.borrow_mut().0 = false;
+                    tl_state.release_allocator_lock();
                 }
             });
         }
@@ -456,11 +480,8 @@ unsafe impl GlobalAlloc for YingProfiler {
                 PROFILER_TL.with(|tl_state| {
                     // We do the following in two steps because we cannot borrow_mut() twice
                     // if profiler code allocates
-                    if !tl_state.borrow().0 {
-                        let mut state = tl_state.borrow_mut();
-                        state.0 = true;
-                        // This drop is important for re-entry purposes
-                        drop(state);
+                    if !tl_state.is_allocator_locked() {
+                        tl_state.set_allocator_lock();
 
                         // -- Beginning of section that may allocate
                         if let Some((_, (stack_hash, alloc_ts))) =
@@ -485,7 +506,7 @@ unsafe impl GlobalAlloc for YingProfiler {
                         }
 
                         // -- End of core profiling section, no more allocations --
-                        tl_state.borrow_mut().0 = false;
+                        tl_state.release_allocator_lock();
                     }
                 });
             }
