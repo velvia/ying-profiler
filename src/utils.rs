@@ -3,6 +3,9 @@
 /// 1. Dumps out top retained memory stats to both logs and disk
 /// 2. ???
 ///
+/// Note that ProfilerRunner uses log framework to periodically dump out logs.  The app is responsible
+/// for initializing the logging infrastructure.
+///
 /// To run:
 /// {{{
 ///     use ying_profiler::utils::ProfilerRunner;
@@ -13,8 +16,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(feature = "profile-spans")]
-use tracing::info;
+use log::{error, info};
 
 use super::*;
 
@@ -65,11 +67,9 @@ impl ProfilerRunner {
                 let new_allocated = YingProfiler::total_allocated() as f64 / (1024.0 * 1024.0);
                 let ratio = (new_allocated - last_retained_mem) / last_retained_mem;
 
-                // TODO: consider switching from tracing logging to generic logger, so this works for anybody
-                #[cfg(feature = "profile-spans")]
                 info!(
-                    new_allocated,
-                    ratio, "Ying: total allocated memory and ratio to last"
+                    "Ying: total allocated memory is {:.2} MB and ratio to last = {}",
+                    new_allocated, ratio
                 );
 
                 // Threshold for change exceeded, do report
@@ -83,7 +83,6 @@ impl ProfilerRunner {
                     last_retained_mem = new_allocated;
 
                     let top_stacks = YingProfiler::top_k_stacks_by_retained(10);
-                    #[cfg(feature = "profile-spans")]
                     for s in &top_stacks {
                         info!("---\n{}\n", s.rich_report(false));
                     }
@@ -100,8 +99,7 @@ impl ProfilerRunner {
                             let _ = writeln!(&f, "---\n{}\n", s.rich_report(false));
                         }
                     } else {
-                        #[cfg(feature = "profile-spans")]
-                        info!("Error: could not write memory report to {:?}", &report_path);
+                        error!("Error: could not write memory report to {:?}", &report_path);
                     }
                 }
             }
