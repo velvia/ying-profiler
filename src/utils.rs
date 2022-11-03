@@ -84,7 +84,8 @@ impl ProfilerRunner {
 
                     let top_stacks = YingProfiler::top_k_stacks_by_retained(10);
                     for s in &top_stacks {
-                        info!("---\n{}\n", s.rich_report(false));
+                        // In case the app does not use log, we still output to STDOUT the report
+                        println!("---\n{}\n", s.rich_report(false));
                     }
 
                     // Formulate profiling filename based on ISO8601 timestamp and number of MBs
