@@ -5,7 +5,7 @@ use ying_profiler::YingProfiler;
 
 #[cfg(test)]
 #[global_allocator]
-static YING_ALLOC: YingProfiler = YingProfiler;
+static YING_ALLOC: YingProfiler = YingProfiler::new(5, 64 * 1024 * 1024 * 1024); // Lower sampling ratio to force our code to be tested more
 
 // Number of allocations to attempt, should be >= 2000 so sampler can work
 const NUM_ALLOCS: usize = 4000;
@@ -20,7 +20,7 @@ fn basic_allocation_free_test() {
     let mut items: Vec<_> = (0..NUM_ALLOCS).map(|_n| Box::new([0u64; 64])).collect();
 
     // Check allocation stats
-    let allocated_now = YingProfiler::total_allocated();
+    let allocated_now = YingProfiler::total_retained_bytes();
     println!("allocated_now = {}", allocated_now);
 
     let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
@@ -40,7 +40,7 @@ fn basic_allocation_free_test() {
     std::thread::sleep(Duration::from_millis(100));
 
     // Check allocation stats - freed bytes should be updated
-    let allocated2 = YingProfiler::total_allocated();
+    let allocated2 = YingProfiler::total_retained_bytes();
     println!("allocated2 = {}", allocated2);
     // After freeing mmeory - less memory should be allocated
     assert!(allocated2 < allocated_now);
@@ -55,7 +55,7 @@ fn basic_allocation_free_test() {
 
     // Number of freed bytes should be roughly half
     assert!(stat.freed_bytes > 0);
-    assert!(stat.retained_estimated_total() > 0);
+    assert!(stat.retained_profiled_bytes() > 0);
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn test_giant_allocation() {
     let layout = std::alloc::Layout::from_size_align(128 * 1024 * 1024 * 1024, 8).unwrap();
 
     // We should get back a null pointer so allocation should fail.
-    let ptr = unsafe { YingProfiler::alloc(&YingProfiler, layout) };
+    let ptr = unsafe { YingProfiler::alloc(&YING_ALLOC, layout) };
     assert_eq!(ptr as u64, 0);
 }
 

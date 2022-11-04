@@ -10,7 +10,7 @@ use tracing::instrument;
 use ying_profiler::YingProfiler;
 
 #[global_allocator]
-static YING_ALLOC: YingProfiler = YingProfiler;
+static YING_ALLOC: YingProfiler = YingProfiler::default();
 
 #[tokio::main]
 async fn main() {
@@ -32,12 +32,12 @@ async fn cache_update_loop() {
 
     // Dump out how much has been allocated so far
     println!(
-        "\nTotal bytes allocated: {}",
-        YingProfiler::total_allocated()
+        "\nTotal bytes retained: {}",
+        YingProfiler::total_retained_bytes()
     );
     println!(
         "Profiled bytes allocated: {}",
-        YingProfiler::profiled_bytes()
+        YingProfiler::profiled_bytes_allocated()
     );
     println!("Size of symbol map: {}", YingProfiler::symbol_map_size());
     // Try changing last param with_filename to true to print out filenames

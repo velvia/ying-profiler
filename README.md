@@ -24,12 +24,12 @@ To see an example which uses Ying and dumps out top stack traces by allocations:
 use ying_profiler::YingProfiler;
 
 #[global_allocator]
-static YING_ALLOC: YingProfiler = YingProfiler;
+static YING_ALLOC: YingProfiler = YingProfiler::default();
 ```
 
-TODO: How to dump out profiling info
-
 ## Feature Flags
+
+- `profile_spans` - gets the current span ID for recorded stacks.   NOTE: This feature is experimental and does not yet yield useful information.  It also causes a panic when used with `tracing_subscriber` due to a problem with `current_span()` allocating and potentially causing a RefCell `borrow()` to fail.
 
 ## Roadmap
 

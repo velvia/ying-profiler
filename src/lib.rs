@@ -36,6 +36,9 @@
 //!
 //! To add support for memory profiling of [tracing Spans](https://docs.rs/tracing/0.1.36/tracing/struct.Span.html),
 //! enable the `profile-spans` feature of this crate.  Span information will be recorded.
+//! NOTE: This feature is experimental and does not yet yield useful information.  It also causes a panic when
+//! used with `tracing_subscriber` due to a problem with `current_span()` allocating and potentially causing a
+//! RefCell `borrow()` to fail.
 //!
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -52,9 +55,6 @@ pub mod callstack;
 pub mod utils;
 use callstack::{FriendlySymbol, StdCallstack};
 
-/// Allocation sampling ratio.  Eg: 500 means 1 in 500 allocations are sampled.
-const DEFAULT_SAMPLING_RATIO: u32 = 500;
-
 /// The number of frames at the top of the stack to skip.  Most of these have to do with
 /// backtrace and this profiler infrastructure.  This number needs to be adjusted
 /// depending on the implementation.
@@ -62,30 +62,55 @@ const DEFAULT_SAMPLING_RATIO: u32 = 500;
 /// For debug builds, this is about 9.
 const TOP_FRAMES_TO_SKIP: usize = 4;
 
-/// Prevent and dump stack trace for giant single allocations beyond a certain size
-const GIANT_SINGLE_ALLOC_LIMIT: usize = 64 * 1024 * 1024 * 1024;
+const DEFAULT_GIANT__ALLOC_LIMIT: usize = 64 * 1024 * 1024 * 1024;
 
 // A map for caching symbols in backtraces so we can mostly store u64's
 type SymbolMap = DashMap<u64, Vec<FriendlySymbol>>;
 
 /// Ying is a memory profiling Allocator wrapper.
 /// Ying is the Chinese word for an eagle.
-pub struct YingProfiler;
+pub struct YingProfiler {
+    /// Allocation sampling ratio.  Eg: 500 means 1 in 500 allocations are sampled.
+    sampling_ratio: u32,
+    /// Prevent and dump stack trace for giant single allocations beyond a certain size
+    single_alloc_limit: usize,
+}
 
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-static PROFILED: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_RETAINED: AtomicUsize = AtomicUsize::new(0);
+static PROFILED_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static PROFILED_RETAINED: AtomicUsize = AtomicUsize::new(0);
 
 impl YingProfiler {
-    /// Total outstanding bytes allocated (not just sampled but all allocations)
+    /// sampling_ratio: number of allocations for every sampled allocation
+    pub const fn new(sampling_ratio: u32, single_alloc_limit: usize) -> Self {
+        Self {
+            sampling_ratio,
+            single_alloc_limit,
+        }
+    }
+
+    pub const fn default() -> Self {
+        Self {
+            sampling_ratio: 500,
+            single_alloc_limit: DEFAULT_GIANT__ALLOC_LIMIT,
+        }
+    }
+
+    /// Total outstanding retained bytes (not just sampled but all allocations)
     #[inline]
-    pub fn total_allocated() -> usize {
-        ALLOCATED.load(Relaxed)
+    pub fn total_retained_bytes() -> usize {
+        TOTAL_RETAINED.load(Relaxed)
     }
 
     /// Total bytes allocated for profiled allocations
     #[inline]
-    pub fn profiled_bytes() -> usize {
-        PROFILED.load(Relaxed)
+    pub fn profiled_bytes_allocated() -> usize {
+        PROFILED_ALLOCATED.load(Relaxed)
+    }
+
+    /// Profiled bytes retained - retained memory usage amongst profiled allocations
+    pub fn profiled_bytes_retained() -> usize {
+        PROFILED_RETAINED.load(Relaxed)
     }
 
     #[inline]
@@ -123,6 +148,32 @@ impl YingProfiler {
                 .collect()
         })
     }
+
+    fn check_and_deny_giant_allocations(&self, ptr: *mut u8, layout: Layout) -> *mut u8 {
+        // Sorry there is an edge case where this check cannot happen if YING is not initialized
+        if layout.size() >= self.single_alloc_limit && Lazy::get(&YING_STATE).is_some() {
+            // Prevent allocation sampling while we are telling the world who did this
+            lock_out_profiler(|| {
+                println!(
+                    "WARNING: Huge memory allocation of {} bytes denied by Ying profiler",
+                    layout.size()
+                );
+
+                let mut bt = Backtrace::new_unresolved();
+
+                // 2. Create a Callstack, check if there is a similar stack
+                let stack = StdCallstack::from_backtrace_unresolved(&bt);
+                stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
+                println!(
+                    "Stack trace:\n{}",
+                    stack.with_symbols_and_filename(&YING_STATE.symbol_map)
+                );
+            });
+            std::ptr::null_mut::<u8>()
+        } else {
+            ptr
+        }
+    }
 }
 
 /// Central struct collecting stats about each stack trace
@@ -157,32 +208,27 @@ impl StackStats {
         self.allocated_bytes.saturating_sub(self.freed_bytes)
     }
 
-    /// Estimated total retained bytes based on sampling ratio
-    pub fn retained_estimated_total(&self) -> u64 {
-        self.retained_profiled_bytes() * (DEFAULT_SAMPLING_RATIO as u64)
-    }
-
     /// Create a rich multi-line report of this StackStats
     /// * filename - include source filename in stack trace
     pub fn rich_report(&self, with_filenames: bool) -> String {
-        let total_profiled_bytes = YingProfiler::profiled_bytes();
-        let pct = (self.allocated_bytes as f64) * 100.0 / (total_profiled_bytes as f64);
+        let profiled_alloc_bytes = YingProfiler::profiled_bytes_allocated();
+        let pct = (self.allocated_bytes as f64) * 100.0 / (profiled_alloc_bytes as f64);
         let mut report = format!(
             "{} profiled bytes allocated ({pct:.2}%) ({} allocations)\n",
             self.allocated_bytes, self.num_allocations
         );
-        let freed_pct = (self.freed_bytes as f64) * 100.0 / (self.allocated_bytes as f64);
+        let retained = self.retained_profiled_bytes();
         let _ = writeln!(
             &mut report,
-            "  {} profiled bytes freed ({freed_pct:.2}% of allocated) ({} frees)",
-            self.freed_bytes, self.num_frees
+            "  {} profiled bytes retained  ({} frees)",
+            retained, self.num_frees
         );
-        let retained = self.retained_estimated_total();
-        let retained_pct = (retained as f64) * 100.0 / YingProfiler::total_allocated() as f64;
+        let retained_pct_allocs = (retained as f64) * 100.0 / (self.allocated_bytes as f64);
+        let retained_pct_all =
+            (retained as f64) * 100.0 / YingProfiler::profiled_bytes_retained() as f64;
         let _ = writeln!(
             &mut report,
-            "  Estimated {} total bytes retained ({retained_pct:.2}% of total) ",
-            retained
+            "    ({retained_pct_all:.2}% of all retained profiled allocs) ({retained_pct_allocs:.2}% of allocated bytes)",
         );
 
         #[cfg(feature = "profile-spans")]
@@ -190,6 +236,8 @@ impl StackStats {
             let _ = writeln!(&mut report, "\ttracing span id: {:?}", self.span.id());
         }
 
+        // TODO: this won't be needed once we upgrade from dashmap to something which does atomic reads
+        // Also try to make locking or accesses more fine grained
         lock_out_profiler(|| {
             let decorated_stack = if with_filenames {
                 self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
@@ -305,10 +353,10 @@ impl YingThreadLocal {
     }
 
     /// Obtains the counter, checks for sampling ratio, and updates counter in one go
-    fn should_sample(&self) -> bool {
+    fn should_sample(&self, ratio: u32) -> bool {
         let counter = self.sample_count.get();
         self.sample_count.set(counter + 1); // update counter for next sampling
-        counter % DEFAULT_SAMPLING_RATIO == 0
+        counter % ratio == 0
     }
 
     // Resets counter to 0 to guarantee next call to alloc() will sample.  TESTING ONLY
@@ -339,48 +387,23 @@ fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
     })
 }
 
-fn check_and_deny_giant_allocations(ptr: *mut u8, layout: Layout) -> *mut u8 {
-    // Sorry there is an edge case where this check cannot happen if YING is not initialized
-    if layout.size() >= GIANT_SINGLE_ALLOC_LIMIT && Lazy::get(&YING_STATE).is_some() {
-        // Prevent allocation sampling while we are telling the world who did this
-        lock_out_profiler(|| {
-            println!(
-                "WARNING: Huge memory allocation of {} bytes denied by Ying profiler",
-                layout.size()
-            );
-
-            let mut bt = Backtrace::new_unresolved();
-
-            // 2. Create a Callstack, check if there is a similar stack
-            let stack = StdCallstack::from_backtrace_unresolved(&bt);
-            stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
-            println!(
-                "Stack trace:\n{}",
-                stack.with_symbols_and_filename(&YING_STATE.symbol_map)
-            );
-        });
-        std::ptr::null_mut::<u8>()
-    } else {
-        ptr
-    }
-}
-
 unsafe impl GlobalAlloc for YingProfiler {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // NOTE: the code between here and the state.0 = true must be re-entrant
         // and therefore not allocate, otherwise there will be an infinite loop.
-        let alloc_ptr = check_and_deny_giant_allocations(System.alloc(layout), layout);
+        let alloc_ptr = self.check_and_deny_giant_allocations(System.alloc(layout), layout);
         if !alloc_ptr.is_null() {
-            ALLOCATED.fetch_add(layout.size(), SeqCst);
+            TOTAL_RETAINED.fetch_add(layout.size(), SeqCst);
 
             // Now, sample allocation - if it falls below threshold, then profile
             // Also, we set a ThreadLocal to avoid re-entry: ie the code below might allocate,
             // and we avoid profiling if we are already in the loop below.  Avoids cycles.
             PROFILER_TL.with(|tl_state| {
-                if !tl_state.is_allocator_locked() && tl_state.should_sample() {
+                if !tl_state.is_allocator_locked() && tl_state.should_sample(self.sampling_ratio) {
                     tl_state.set_allocator_lock();
 
-                    PROFILED.fetch_add(layout.size(), SeqCst);
+                    PROFILED_ALLOCATED.fetch_add(layout.size(), SeqCst);
+                    PROFILED_RETAINED.fetch_add(layout.size(), SeqCst);
 
                     // -- Beginning of section that may allocate
                     // 1. Get unresolved backtrace for speed
@@ -419,7 +442,7 @@ unsafe impl GlobalAlloc for YingProfiler {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout);
-        ALLOCATED.fetch_sub(layout.size(), SeqCst);
+        TOTAL_RETAINED.fetch_sub(layout.size(), SeqCst);
 
         // Return immediately and skip rest of this if YING_STATE is not initialized.  It could cause
         // an infinite loop because during initialization of YING_STATE, dealloc() could be then called
@@ -430,6 +453,7 @@ unsafe impl GlobalAlloc for YingProfiler {
         // If the allocation was recorded in outstanding_allocs, then remove it and update stats
         // about number of bytes freed etc.  Do this with protection to guard against possible re-entry.
         if YING_STATE.outstanding_allocs.contains_key(&(ptr as u64)) {
+            PROFILED_RETAINED.fetch_sub(layout.size(), SeqCst);
             PROFILER_TL.with(|tl_state| {
                 if !tl_state.is_allocator_locked() {
                     tl_state.set_allocator_lock();
@@ -467,7 +491,7 @@ unsafe impl GlobalAlloc for YingProfiler {
         // `layout.align()` comes from a `Layout` and is thus guaranteed to be valid.
         let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
         // SAFETY: the caller must ensure that `new_layout` is greater than zero.
-        let new_ptr = check_and_deny_giant_allocations(System.alloc(new_layout), new_layout);
+        let new_ptr = self.check_and_deny_giant_allocations(System.alloc(new_layout), new_layout);
         if !new_ptr.is_null() {
             // SAFETY: the previously allocated block cannot overlap the newly allocated block.
             // The safety contract for `dealloc` must be upheld by the caller.
@@ -476,9 +500,9 @@ unsafe impl GlobalAlloc for YingProfiler {
 
             // 1. Update global statistics
             if new_size > old_size {
-                ALLOCATED.fetch_add(new_size - old_size, SeqCst);
+                TOTAL_RETAINED.fetch_add(new_size - old_size, SeqCst);
             } else {
-                ALLOCATED.fetch_sub(old_size - new_size, SeqCst);
+                TOTAL_RETAINED.fetch_sub(old_size - new_size, SeqCst);
             }
 
             // 2. IF the old pointer was in outstanding_allocs, move it and make a new entry,
@@ -488,6 +512,12 @@ unsafe impl GlobalAlloc for YingProfiler {
             if Lazy::get(&YING_STATE).is_some()
                 && YING_STATE.outstanding_allocs.contains_key(&(ptr as u64))
             {
+                if new_size > old_size {
+                    PROFILED_RETAINED.fetch_add(new_size - old_size, SeqCst);
+                } else {
+                    PROFILED_RETAINED.fetch_sub(old_size - new_size, SeqCst);
+                }
+
                 PROFILER_TL.with(|tl_state| {
                     if !tl_state.is_allocator_locked() {
                         tl_state.set_allocator_lock();

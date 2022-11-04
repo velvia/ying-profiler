@@ -64,7 +64,7 @@ impl ProfilerRunner {
                 std::thread::sleep(Duration::from_secs(check_interval_secs as u64));
 
                 // Check and compare memory
-                let new_allocated = YingProfiler::total_allocated() as f64 / (1024.0 * 1024.0);
+                let new_allocated = YingProfiler::total_retained_bytes() as f64 / (1024.0 * 1024.0);
                 let ratio = (new_allocated - last_retained_mem) / last_retained_mem;
 
                 info!(
