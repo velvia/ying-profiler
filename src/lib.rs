@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use backtrace::Backtrace;
 use coarsetime::Clock;
-use dashmap::DashMap;
+use leapfrog::leapmap::LeapMap;
 use once_cell::sync::Lazy;
 
 pub mod callstack;
@@ -254,11 +254,11 @@ impl StackStats {
 struct YingState {
     symbol_map: SymbolMap,
     // Main map of stack hash to StackStats
-    stack_stats: DashMap<u64, StackStats>,
+    stack_stats: LeapMap<u64, StackStats>,
     // Map of outstanding sampled allocations.  Used to figure out amount of outstanding allocations and
     // statistics about how long lived outstanding allocations are.
     // (*ptr as u64 -> (stack hash, start_timestamp_epoch_millis))
-    outstanding_allocs: DashMap<u64, (u64, u64)>,
+    outstanding_allocs: LeapMap<u64, (u64, u64)>,
 }
 
 // lazily initialized global state
@@ -268,9 +268,11 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
         let was_locked = tl_state.is_allocator_locked();
         tl_state.set_allocator_lock();
 
+        // Use the base System allocator for our own maps, so that when we insert state in it we don't have
+        // to worry about triggering re-entrant calls back into our own alloc() method.  Much safer!!
         let symbol_map = SymbolMap::with_capacity(1000);
-        let stack_stats = DashMap::with_capacity(1000);
-        let outstanding_allocs = DashMap::with_capacity(5000);
+        let stack_stats = LeapMap::new_in(System);
+        let outstanding_allocs = LeapMap::new_in(System);
         let s = YingState {
             symbol_map,
             stack_stats,
