@@ -36,7 +36,7 @@ impl<const NF: usize> Callstack<NF> {
 
     pub fn compute_hash(&self) -> u64 {
         let mut hasher = WyHash::with_seed(17);
-        hasher.write(unsafe { (&self.frames).align_to::<u8>().1 });
+        hasher.write(unsafe { (self.frames).align_to::<u8>().1 });
         hasher.finish()
     }
 

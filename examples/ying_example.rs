@@ -1,3 +1,4 @@
+use futures::future::join_all;
 use moka::sync::Cache;
 use rand::distributions::Alphanumeric;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -21,13 +22,24 @@ async fn main() {
 }
 
 async fn cache_update_loop() {
-    let mut cache = Cache::new(10_000);
+    let cache = Cache::new(10_000);
 
-    let mut rng = SmallRng::from_entropy();
-    for _ in 0..50_000 {
+    let rng = SmallRng::from_entropy();
+    for _ in 0..50 {
         // One allocation here
-        let new_str: String = (0..10).map(|_| rng.sample(Alphanumeric) as char).collect();
-        insert_one(&mut cache, new_str).await;
+        let handles: Vec<_> = (0..1000)
+            .map(|_n| {
+                let mut rng = rng.clone();
+                let cache = cache.clone();
+                tokio::task::spawn(async move {
+                    let new_str: String =
+                        (0..10).map(|_| rng.sample(Alphanumeric) as char).collect();
+                    insert_one(&cache, new_str).await;
+                })
+            })
+            .collect();
+
+        join_all(handles).await;
     }
 
     // Dump out how much has been allocated so far
@@ -49,13 +61,13 @@ async fn cache_update_loop() {
 
 #[cfg(feature = "profile-spans")]
 #[instrument(level = "info", skip_all)]
-async fn insert_one(cache: &mut Cache<String, String>, s: String) {
+async fn insert_one(cache: &Cache<String, String>, s: String) {
     // Another allocation here
     cache.insert(s.clone(), s);
 }
 
 #[cfg(not(feature = "profile-spans"))]
-async fn insert_one(cache: &mut Cache<String, String>, s: String) {
+async fn insert_one(cache: &Cache<String, String>, s: String) {
     // Another allocation here
     cache.insert(s.clone(), s);
 }

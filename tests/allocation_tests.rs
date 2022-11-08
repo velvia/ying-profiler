@@ -1,6 +1,7 @@
 use std::alloc::GlobalAlloc;
 use std::time::Duration;
 
+use serial_test::serial;
 use ying_profiler::YingProfiler;
 
 #[cfg(test)]
@@ -11,9 +12,13 @@ static YING_ALLOC: YingProfiler = YingProfiler::new(5, 64 * 1024 * 1024 * 1024);
 const NUM_ALLOCS: usize = 4000;
 
 #[test]
+#[serial]
 fn basic_allocation_free_test() {
     // We need to give some time for the profiler to start up
     std::thread::sleep(Duration::from_millis(100));
+
+    // Reset state so mixing tests isn't a problem
+    ying_profiler::reset_state_for_testing_only();
 
     // Make thousands of allocations by allocating some small items.  Remember this is a sampling
     // profiler, so we need to make enough.
@@ -59,6 +64,7 @@ fn basic_allocation_free_test() {
 }
 
 #[test]
+#[serial]
 fn test_giant_allocation() {
     // We need to give some time for the profiler to start up
     std::thread::sleep(Duration::from_millis(100));
@@ -73,10 +79,11 @@ fn test_giant_allocation() {
 
 // Reproduces deadlock produced when we print out stack traces and also insert new symbols at the same time
 #[test]
+#[serial]
 fn test_print_allocations_deadlock() {
     // Make thousands of allocations by allocating some small items.  Remember this is a sampling
     // profiler, so we need to make enough.
-    // let _items: Vec<_> = (0..NUM_ALLOCS).map(|_n| Box::new([0u64; 64])).collect();
+    let _items: Vec<_> = (0..NUM_ALLOCS).map(|_n| Box::new([0u64; 64])).collect();
 
     let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
 

@@ -317,6 +317,11 @@ fn stack_list_retained_bytes_desc() -> Vec<(u64, u64)> {
     items
 }
 
+pub fn reset_state_for_testing_only() {
+    YING_STATE.stack_stats.clear();
+    YING_STATE.outstanding_allocs.clear();
+}
+
 // NOTE: The creation of state in this TL must NOT allocate. Otherwise it will cause
 // the profiler code to go into an endless loop.
 // The u32 is used for allocation sampling. It starts at 0 so that even shorter lived threads
