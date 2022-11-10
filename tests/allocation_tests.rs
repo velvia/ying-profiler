@@ -1,6 +1,12 @@
 use std::alloc::GlobalAlloc;
+use std::fmt::Write;
 use std::time::Duration;
 
+use futures::future::join_all;
+use moka::sync::Cache;
+use rand::distributions::Alphanumeric;
+use rand::{rngs::SmallRng, Rng, SeedableRng};
+use serial_test::serial;
 use ying_profiler::YingProfiler;
 
 #[cfg(test)]
@@ -11,9 +17,13 @@ static YING_ALLOC: YingProfiler = YingProfiler::new(5, 64 * 1024 * 1024 * 1024);
 const NUM_ALLOCS: usize = 4000;
 
 #[test]
+#[serial]
 fn basic_allocation_free_test() {
     // We need to give some time for the profiler to start up
     std::thread::sleep(Duration::from_millis(100));
+
+    // Reset state so mixing tests isn't a problem
+    ying_profiler::reset_state_for_testing_only();
 
     // Make thousands of allocations by allocating some small items.  Remember this is a sampling
     // profiler, so we need to make enough.
@@ -59,6 +69,7 @@ fn basic_allocation_free_test() {
 }
 
 #[test]
+#[serial]
 fn test_giant_allocation() {
     // We need to give some time for the profiler to start up
     std::thread::sleep(Duration::from_millis(100));
@@ -73,10 +84,11 @@ fn test_giant_allocation() {
 
 // Reproduces deadlock produced when we print out stack traces and also insert new symbols at the same time
 #[test]
+#[serial]
 fn test_print_allocations_deadlock() {
     // Make thousands of allocations by allocating some small items.  Remember this is a sampling
     // profiler, so we need to make enough.
-    // let _items: Vec<_> = (0..NUM_ALLOCS).map(|_n| Box::new([0u64; 64])).collect();
+    let _items: Vec<_> = (0..NUM_ALLOCS).map(|_n| Box::new([0u64; 64])).collect();
 
     let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
 
@@ -88,4 +100,55 @@ fn test_print_allocations_deadlock() {
         // This should generate a bunch of allocations, which should cause potential deadlocks
         println!("---\n{}\n", s.rich_report(false));
     }
+}
+
+#[tokio::test]
+#[serial]
+async fn stress_test() {
+    // Spin up tons of allocations in a bunch of threads.
+    // At the same time, spin up a task which is repeatedly printing alloc reports into a string
+    // buffer - thus forcing allocator to be updating and separately reading all the time.
+    let dump_allocs_handle = std::thread::spawn(|| {
+        for _ in 0..4000 {
+            let top_stacks = YingProfiler::top_k_stacks_by_allocated(10);
+            // Big growing allocation here for string report
+            let mut report_str = String::new();
+            for s in &top_stacks {
+                writeln!(&mut report_str, "---\n{}\n", s.rich_report(true)).unwrap();
+            }
+        }
+        println!("Finished dumping reports...");
+    });
+
+    let cache = Cache::new(10_000);
+
+    let rng = SmallRng::from_entropy();
+    for outer in 0isize..50 {
+        let starting_num = outer * 1000;
+        let prev_num = (outer - 1) * 1000;
+
+        let handles: Vec<_> = (0..1000)
+            .map(|n| {
+                let mut rng = rng.clone();
+                let cache = cache.clone();
+                tokio::task::spawn(async move {
+                    let new_str: String =
+                        (0..10).map(|_| rng.sample(Alphanumeric) as char).collect();
+                    cache.insert(starting_num + n, new_str);
+                })
+            })
+            .collect();
+
+        // At the same time remove a bunch of keys to free up memory - exercise free()
+        if prev_num >= 0 {
+            for n in 0..1000 {
+                cache.invalidate(&(prev_num + n));
+            }
+        }
+
+        join_all(handles).await;
+    }
+    println!("Finished alloc/dealloc cycles");
+
+    dump_allocs_handle.join().expect("Cannot wait for thread");
 }
