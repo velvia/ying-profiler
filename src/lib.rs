@@ -40,20 +40,23 @@
 //! used with `tracing_subscriber` due to a problem with `current_span()` allocating and potentially causing a
 //! RefCell `borrow()` to fail.
 //!
+use core::hash::BuildHasherDefault;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use backtrace::Backtrace;
 use coarsetime::Clock;
-use leapfrog::leapmap::LeapMap;
+use leapfrog::{Value, leapmap::LeapMap};
 use once_cell::sync::Lazy;
 
 pub mod callstack;
 pub mod utils;
-use callstack::{FriendlySymbol, StdCallstack};
+use callstack::{FriendlySymbol, StdCallstack, StackStats};
 
 /// The number of frames at the top of the stack to skip.  Most of these have to do with
 /// backtrace and this profiler infrastructure.  This number needs to be adjusted
@@ -65,7 +68,9 @@ const TOP_FRAMES_TO_SKIP: usize = 4;
 const DEFAULT_GIANT__ALLOC_LIMIT: usize = 64 * 1024 * 1024 * 1024;
 
 // A map for caching symbols in backtraces so we can mostly store u64's
-type SymbolMap = DashMap<u64, Vec<FriendlySymbol>>;
+// We only add to it when a new IP needs symbols, and only read on decoding, so high concurrency
+// isn't needed
+type SymbolMap = Mutex<HashMap<u64, Vec<FriendlySymbol>>>;
 
 /// Ying is a memory profiling Allocator wrapper.
 /// Ying is the Chinese word for an eagle.
@@ -115,7 +120,7 @@ impl YingProfiler {
 
     #[inline]
     pub fn symbol_map_size() -> usize {
-        YING_STATE.symbol_map.len()
+        YING_STATE.symbol_map.lock().unwrap().len()
     }
 
     /// Number of entries for outstanding sampled allocations map
@@ -132,7 +137,7 @@ impl YingProfiler {
             stacks_by_alloc
                 .iter()
                 .take(k)
-                .map(|&(stack_hash, _bytes_allocated)| get_stats_for_stack_hash(stack_hash))
+                .filter_map(|&(stack_hash, _bytes_allocated)| get_stats_for_stack_hash(stack_hash))
                 .collect()
         })
     }
@@ -144,7 +149,7 @@ impl YingProfiler {
             stacks_by_retained
                 .iter()
                 .take(k)
-                .map(|&(stack_hash, _bytes_retained)| get_stats_for_stack_hash(stack_hash))
+                .filter_map(|&(stack_hash, _bytes_retained)| get_stats_for_stack_hash(stack_hash))
                 .collect()
         })
     }
@@ -176,77 +181,39 @@ impl YingProfiler {
     }
 }
 
-/// Central struct collecting stats about each stack trace
-#[derive(Debug, Clone)]
-pub struct StackStats {
-    stack: StdCallstack,
-    pub allocated_bytes: u64,
-    pub num_allocations: u64,
-    pub freed_bytes: u64,
-    pub num_frees: u64,
-    #[cfg(feature = "profile-spans")]
-    span: tracing::Span,
+
+#[derive(Copy, Debug, Clone)]
+struct AllocInfo(u64, u64);
+
+impl AllocInfo {
+    fn new(stack_hash: u64, allocation_timestamp: u64) -> Self {
+        Self(stack_hash, allocation_timestamp)
+    }
+
+    fn stack_hash(&self) -> u64 {
+        self.0
+    }
+
+    fn allocation_timestamp_millis(&self) -> u64 {
+        self.1
+    }
 }
 
-impl StackStats {
-    // Constructor not public.  Only this crate should create new stats.
-    fn new(stack: StdCallstack, initial_alloc_bytes: Option<u64>) -> Self {
-        Self {
-            stack,
-            allocated_bytes: initial_alloc_bytes.unwrap_or(0),
-            num_allocations: initial_alloc_bytes.map(|_| 1).unwrap_or(0),
-            freed_bytes: 0,
-            num_frees: 0,
-            #[cfg(feature = "profile-spans")]
-            span: tracing::Span::current(),
-        }
+impl Value for AllocInfo {
+    fn is_redirect(&self) -> bool {
+        self.0 == (u64::MAX - 1)
     }
 
-    /// The number of "retained" bytes as seen by this profiler from sampling
-    pub fn retained_profiled_bytes(&self) -> u64 {
-        // NOTE: saturating_sub here is really important, freed could be slightly bigger than allocated
-        self.allocated_bytes.saturating_sub(self.freed_bytes)
+    fn is_null(&self) -> bool {
+        self.0 == u64::MAX
     }
 
-    /// Create a rich multi-line report of this StackStats
-    /// * filename - include source filename in stack trace
-    pub fn rich_report(&self, with_filenames: bool) -> String {
-        let profiled_alloc_bytes = YingProfiler::profiled_bytes_allocated();
-        let pct = (self.allocated_bytes as f64) * 100.0 / (profiled_alloc_bytes as f64);
-        let mut report = format!(
-            "{} profiled bytes allocated ({pct:.2}%) ({} allocations)\n",
-            self.allocated_bytes, self.num_allocations
-        );
-        let retained = self.retained_profiled_bytes();
-        let _ = writeln!(
-            &mut report,
-            "  {} profiled bytes retained  ({} frees)",
-            retained, self.num_frees
-        );
-        let retained_pct_allocs = (retained as f64) * 100.0 / (self.allocated_bytes as f64);
-        let retained_pct_all =
-            (retained as f64) * 100.0 / YingProfiler::profiled_bytes_retained() as f64;
-        let _ = writeln!(
-            &mut report,
-            "    ({retained_pct_all:.2}% of all retained profiled allocs) ({retained_pct_allocs:.2}% of allocated bytes)",
-        );
+    fn redirect() -> Self {
+        Self(u64::MAX - 1, u64::MAX - 1)
+    }
 
-        #[cfg(feature = "profile-spans")]
-        if !self.span.is_disabled() {
-            let _ = writeln!(&mut report, "\ttracing span id: {:?}", self.span.id());
-        }
-
-        // TODO: this won't be needed once we upgrade from dashmap to something which does atomic reads
-        // Also try to make locking or accesses more fine grained
-        lock_out_profiler(|| {
-            let decorated_stack = if with_filenames {
-                self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
-            } else {
-                self.stack.with_symbols(&YING_STATE.symbol_map)
-            };
-            let _ = writeln!(&mut report, "{}", decorated_stack);
-        });
-        report
+    fn null() -> Self {
+        Self(u64::MAX, u64::MAX)
     }
 }
 
@@ -254,11 +221,11 @@ impl StackStats {
 struct YingState {
     symbol_map: SymbolMap,
     // Main map of stack hash to StackStats
-    stack_stats: LeapMap<u64, StackStats>,
+    stack_stats: LeapMap<u64, StackStats, BuildHasherDefault<DefaultHasher>, System>,
     // Map of outstanding sampled allocations.  Used to figure out amount of outstanding allocations and
     // statistics about how long lived outstanding allocations are.
     // (*ptr as u64 -> (stack hash, start_timestamp_epoch_millis))
-    outstanding_allocs: LeapMap<u64, (u64, u64)>,
+    outstanding_allocs: LeapMap<u64, AllocInfo, BuildHasherDefault<DefaultHasher>, System>,
 }
 
 // lazily initialized global state
@@ -270,7 +237,7 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
 
         // Use the base System allocator for our own maps, so that when we insert state in it we don't have
         // to worry about triggering re-entrant calls back into our own alloc() method.  Much safer!!
-        let symbol_map = SymbolMap::with_capacity(1000);
+        let symbol_map = Mutex::new(HashMap::with_capacity(1000));
         let stack_stats = LeapMap::new_in(System);
         let outstanding_allocs = LeapMap::new_in(System);
         let s = YingState {
@@ -286,13 +253,11 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
     })
 });
 
-fn get_stats_for_stack_hash(stack_hash: u64) -> StackStats {
+fn get_stats_for_stack_hash(stack_hash: u64) -> Option<StackStats> {
     YING_STATE
         .stack_stats
         .get(&stack_hash)
-        .expect("Did stats get removed?")
-        .value()
-        .clone()
+        .and_then(|mut stats| stats.value())
 }
 
 /// Returns a list of stack IDs (stack_hash, bytes_allocated) in order from highest
@@ -300,8 +265,12 @@ fn get_stats_for_stack_hash(stack_hash: u64) -> StackStats {
 fn stack_list_allocated_bytes_desc() -> Vec<(u64, u64)> {
     let mut items = Vec::new();
     // TODO: filter away entries with minimal allocations, say <1% or some threshold
-    for entry in &YING_STATE.stack_stats {
-        items.push((*entry.key(), entry.value().allocated_bytes));
+    for mut entry in YING_STATE.stack_stats.iter() {
+        if let Some(k) = entry.key() {
+            if let Some(v) = entry.value() {
+                items.push((k, v.allocated_bytes));
+            }
+        }
     }
     items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     items
@@ -312,16 +281,24 @@ fn stack_list_allocated_bytes_desc() -> Vec<(u64, u64)> {
 fn stack_list_retained_bytes_desc() -> Vec<(u64, u64)> {
     let mut items = Vec::new();
     // TODO: filter away entries with minimal retained allocations, say <1% or some threshold
-    for entry in &YING_STATE.stack_stats {
-        items.push((*entry.key(), entry.value().retained_profiled_bytes()));
+    for mut entry in YING_STATE.stack_stats.iter() {
+        if let Some(k) = entry.key() {
+            if let Some(v) = entry.value() {
+                items.push((k, v.retained_profiled_bytes()));
+            }
+        }
     }
     items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     items
 }
 
 pub fn reset_state_for_testing_only() {
-    YING_STATE.stack_stats.clear();
-    YING_STATE.outstanding_allocs.clear();
+    for mut item in YING_STATE.stack_stats.iter() {
+        item.key().as_ref().map(|k| YING_STATE.stack_stats.remove(k));
+    }
+    for mut item in YING_STATE.outstanding_allocs.iter() {
+        item.key().as_ref().map(|k| YING_STATE.outstanding_allocs.remove(k));
+    }
 }
 
 // NOTE: The creation of state in this TL must NOT allocate. Otherwise it will cause
@@ -379,7 +356,7 @@ pub fn testing_only_guarantee_next_sample() {
 /// Locks the profiler flag so that allocations are not profiled.
 /// This is for non-profiler code such as debug prints that has to access the Dashmap or state
 /// and could potentially cause deadlock problems with Dashmap for example.
-fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
+pub(crate) fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
     PROFILER_TL.with(|tl_state| {
         // Within the same thread, nobody else should be holding the profiler lock here,
         // but we'll check just to be sure
@@ -419,25 +396,24 @@ unsafe impl GlobalAlloc for YingProfiler {
                     // 2. Create a Callstack, check if there is a similar stack
                     let stack = StdCallstack::from_backtrace_unresolved(&bt);
                     let stack_hash = stack.compute_hash();
-                    YING_STATE
-                        .stack_stats
-                        .entry(stack_hash)
-                        .and_modify(|stats| {
-                            // 4. Update stats
+                    if let Some(mut kv_ref) = YING_STATE.stack_stats.get_mut(&stack_hash) {
+                        kv_ref.update(|mut stats| {
                             stats.num_allocations += 1;
                             stats.allocated_bytes += layout.size() as u64;
-                        })
-                        .or_insert_with(|| {
-                            // 3. Resolve symbols if needed (new stack entry)
-                            stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
-                            StackStats::new(stack, Some(layout.size() as u64))
                         });
+                    } else {
+                        // 3. Resolve symbols if needed (new stack entry)
+                        stack.populate_symbol_map(&mut bt, &YING_STATE.symbol_map);
+                        let stats = StackStats::new(stack, Some(layout.size() as u64));
+                        YING_STATE.stack_stats.insert(stack_hash, stats);
+                    }
 
                     // 4. Record allocation so we can track outstanding vs transient allocs
+                    // We should be able to just insert as alloc_ptr should always be new
                     YING_STATE
                         .outstanding_allocs
-                        .entry(alloc_ptr as u64)
-                        .or_insert_with(|| (stack_hash, Clock::recent_since_epoch().as_millis()));
+                        .insert(alloc_ptr as u64,
+                                AllocInfo::new(stack_hash, Clock::recent_since_epoch().as_millis()));
 
                     // -- End of core profiling section, no more allocations --
                     tl_state.release_allocator_lock();
@@ -466,17 +442,16 @@ unsafe impl GlobalAlloc for YingProfiler {
                     tl_state.set_allocator_lock();
 
                     // -- Beginning of section that may allocate
-                    if let Some((_, (stack_hash, _alloc_ts))) =
+                    if let Some(alloc_info) =
                         YING_STATE.outstanding_allocs.remove(&(ptr as u64))
                     {
                         // Update memory profiling freed bytes stats
-                        YING_STATE
-                            .stack_stats
-                            .entry(stack_hash)
-                            .and_modify(|stats| {
+                        if let Some(mut kv_ref) = YING_STATE.stack_stats.get_mut(&alloc_info.stack_hash()) {
+                            kv_ref.update(|mut stats| {
                                 stats.freed_bytes += layout.size() as u64;
                                 stats.num_frees += 1;
                             });
+                        }
 
                         // TODO: see how long allocation was for, and update stats about how long lived
                     }
@@ -530,25 +505,23 @@ unsafe impl GlobalAlloc for YingProfiler {
                         tl_state.set_allocator_lock();
 
                         // -- Beginning of section that may allocate
-                        if let Some((_, (stack_hash, alloc_ts))) =
+                        if let Some(alloc_info) =
                             YING_STATE.outstanding_allocs.remove(&(ptr as u64))
                         {
                             YING_STATE
                                 .outstanding_allocs
-                                .insert(new_ptr as u64, (stack_hash, alloc_ts));
+                                .insert(new_ptr as u64, alloc_info);
 
                             // Update memory profiling freed bytes stats
-                            YING_STATE
-                                .stack_stats
-                                .entry(stack_hash)
-                                .and_modify(|stats| {
+                            if let Some(mut kv_ref) = YING_STATE.stack_stats.get_mut(&alloc_info.stack_hash()) {
+                                kv_ref.update(|mut stats| {
                                     if new_size > old_size {
                                         stats.allocated_bytes += (new_size - old_size) as u64;
                                     } else {
                                         stats.allocated_bytes -= (old_size - new_size) as u64;
                                     }
-                                    // Don't change number of allocations or frees
                                 });
+                            }
                         }
 
                         // -- End of core profiling section, no more allocations --
