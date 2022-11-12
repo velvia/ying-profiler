@@ -44,7 +44,6 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
-use std::time::Duration;
 
 use backtrace::Backtrace;
 use coarsetime::Clock;
@@ -265,7 +264,6 @@ struct YingState {
 static YING_STATE: Lazy<YingState> = Lazy::new(|| {
     // We need to disable the profiler in here as it could cause an endless loop otherwise trying to initialize
     PROFILER_TL.with(|tl_state| {
-        let was_locked = tl_state.is_allocator_locked();
         tl_state.set_allocator_lock();
 
         let symbol_map = SymbolMap::with_capacity(1000);
@@ -277,9 +275,7 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
             outstanding_allocs,
         };
 
-        if !was_locked {
-            tl_state.release_allocator_lock();
-        }
+        tl_state.release_allocator_lock();
         s
     })
 });
@@ -333,28 +329,31 @@ thread_local! {
 /// A struct to provide a better API around the lock out profiler flag/re-entrancy plus sampling
 /// This is meant to be used ONLY in a thread-local and is definitely not multi-thread safe.
 struct YingThreadLocal {
-    alloc_locked: Cell<bool>,
+    // Counts up for every time we enter a no-allocator critical section (ie where we have to touch
+    // allocator state or cause an allocation within profiling-related code and don't want sampling
+    // of re-entrant allocations done).  Nonzero prevents allocator from sampling.
+    alloc_lock: Cell<u32>,
     sample_count: Cell<u32>,
 }
 
 impl YingThreadLocal {
     fn new() -> Self {
         Self {
-            alloc_locked: Cell::new(false),
+            alloc_lock: Cell::new(0),
             sample_count: Cell::new(0),
         }
     }
 
     fn is_allocator_locked(&self) -> bool {
-        self.alloc_locked.get()
+        self.alloc_lock.get() > 0
     }
 
     fn set_allocator_lock(&self) {
-        self.alloc_locked.set(true);
+        self.alloc_lock.set(self.alloc_lock.get().saturating_add(1));
     }
 
     fn release_allocator_lock(&self) {
-        self.alloc_locked.set(false);
+        self.alloc_lock.set(self.alloc_lock.get().saturating_sub(1));
     }
 
     /// Obtains the counter, checks for sampling ratio, and updates counter in one go
@@ -379,12 +378,6 @@ pub fn testing_only_guarantee_next_sample() {
 /// and could potentially cause deadlock problems with Dashmap for example.
 fn lock_out_profiler<R>(func: impl FnOnce() -> R) -> R {
     PROFILER_TL.with(|tl_state| {
-        // Within the same thread, nobody else should be holding the profiler lock here,
-        // but we'll check just to be sure
-        while tl_state.is_allocator_locked() {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
         tl_state.set_allocator_lock();
         let return_val = func();
         tl_state.release_allocator_lock();
