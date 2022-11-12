@@ -16,6 +16,7 @@ static YING_ALLOC: YingProfiler = YingProfiler::new(5, 64 * 1024 * 1024 * 1024);
 // Number of allocations to attempt, should be >= 2000 so sampler can work
 const NUM_ALLOCS: usize = 4000;
 
+// NOTE: tests must run serially because allocator is global and we count stats
 #[test]
 #[serial]
 fn basic_allocation_free_test() {
@@ -105,6 +106,8 @@ fn test_print_allocations_deadlock() {
 #[tokio::test]
 #[serial]
 async fn stress_test() {
+    ying_profiler::reset_state_for_testing_only();
+
     // Spin up tons of allocations in a bunch of threads.
     // At the same time, spin up a task which is repeatedly printing alloc reports into a string
     // buffer - thus forcing allocator to be updating and separately reading all the time.
@@ -122,12 +125,15 @@ async fn stress_test() {
 
     let cache = Cache::new(10_000);
 
-    let rng = SmallRng::from_entropy();
-    for outer in 0isize..50 {
-        let starting_num = outer * 1000;
-        let prev_num = (outer - 1) * 1000;
+    let num_outer_loops = 50;
+    let num_inner_loops = 1000;
 
-        let handles: Vec<_> = (0..1000)
+    let rng = SmallRng::from_entropy();
+    for outer in 0isize..num_outer_loops {
+        let starting_num = outer * num_inner_loops;
+        let prev_num = (outer - 1) * num_inner_loops;
+
+        let handles: Vec<_> = (0..num_inner_loops)
             .map(|n| {
                 let mut rng = rng.clone();
                 let cache = cache.clone();
@@ -151,4 +157,21 @@ async fn stress_test() {
     println!("Finished alloc/dealloc cycles");
 
     dump_allocs_handle.join().expect("Cannot wait for thread");
+
+    let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
+    for s in &top_stacks {
+        // println!("---\n{}\n", s.rich_report(false));
+    }
+    assert!(top_stacks.len() >= 1);
+
+    // At sampling every 5 allocations, we should have at least outer*inner/5 allocations in the 5 stacks,
+    // probably times constant factor of at least 2, plus frees
+    // This tests that the sampling is working correctly.  If somehow we stop sampling these numbers
+    // would not be so high.
+    let total_allocs: u64 = top_stacks.iter().map(|s| s.num_allocations).sum();
+    let total_frees: u64 = top_stacks.iter().map(|s| s.num_frees).sum();
+
+    let total_expected_allocs = num_outer_loops * num_inner_loops / 5;
+    assert!(total_allocs >= total_expected_allocs as u64);
+    assert!(total_frees >= (total_expected_allocs * 9 / 10) as u64); // > 90% of allocs freed
 }
