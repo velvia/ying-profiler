@@ -47,7 +47,7 @@ impl<const NF: usize> Callstack<NF> {
     pub fn compute_hash(&self) -> u64 {
         let mut hasher = WyHash::with_seed(17);
         hasher.write(unsafe { (self.frames).align_to::<u8>().1 });
-        hasher.finish() // & 0x7fff_ffff_ffff_ffff  // mask out upper bit to prevent clashing with MAX
+        hasher.finish() & 0x7fff_ffff_ffff_ffff  // mask out upper bit to prevent clashing with MAX
     }
 
     /// Goes through the IPs stored and ensures that the symbol map has resolved symbols for

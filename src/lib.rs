@@ -201,11 +201,11 @@ impl AllocInfo {
 
 impl Value for AllocInfo {
     fn is_redirect(&self) -> bool {
-        self.0 == (u64::MAX - 1)
+        (self.0 & self.1) == (u64::MAX - 1)
     }
 
     fn is_null(&self) -> bool {
-        self.0 == u64::MAX
+        (self.0 & self.1) == u64::MAX
     }
 
     fn redirect() -> Self {
