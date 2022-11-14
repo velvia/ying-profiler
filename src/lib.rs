@@ -131,7 +131,7 @@ impl YingProfiler {
             stacks_by_alloc
                 .iter()
                 .take(k)
-                .map(|&(stack_hash, _bytes_allocated)| get_stats_for_stack_hash(stack_hash))
+                .filter_map(|&(stack_hash, _bytes_allocated)| get_stats_for_stack_hash(stack_hash))
                 .collect()
         })
     }
@@ -143,7 +143,7 @@ impl YingProfiler {
             stacks_by_retained
                 .iter()
                 .take(k)
-                .map(|&(stack_hash, _bytes_retained)| get_stats_for_stack_hash(stack_hash))
+                .filter_map(|&(stack_hash, _bytes_retained)| get_stats_for_stack_hash(stack_hash))
                 .collect()
         })
     }
@@ -280,13 +280,11 @@ static YING_STATE: Lazy<YingState> = Lazy::new(|| {
     })
 });
 
-fn get_stats_for_stack_hash(stack_hash: u64) -> StackStats {
+fn get_stats_for_stack_hash(stack_hash: u64) -> Option<StackStats> {
     YING_STATE
         .stack_stats
         .get(&stack_hash)
-        .expect("Did stats get removed?")
-        .value()
-        .clone()
+        .map(|r| r.value().clone())
 }
 
 /// Returns a list of stack IDs (stack_hash, bytes_allocated) in order from highest

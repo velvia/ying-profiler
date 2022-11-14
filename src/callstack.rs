@@ -178,17 +178,21 @@ pub struct FriendlySymbol {
 impl From<&BacktraceSymbol> for FriendlySymbol {
     fn from(s: &BacktraceSymbol) -> Self {
         // Get demangled name and strip the final ::<hex>
-        let demangled = format!("{}", s.name().expect("Name should exist"));
-        let friendly_name = SYMBOL_REGEXES
-            .name_end_re
-            .replace(&demangled, "")
-            .into_owned();
+        let friendly_name = if let Some(symbolname) = s.name() {
+            let demangled = format!("{}", symbolname);
+            SYMBOL_REGEXES
+                .name_end_re
+                .replace(&demangled, "")
+                .into_owned()
+        } else {
+            "<none>".into()
+        };
 
-        let is_poll = demangled.contains("::poll::");
+        let is_poll = friendly_name.contains("::poll::");
 
         // Get filename and convert common patterns
         let shorter_filename = if let Some(p) = s.filename() {
-            let filename = p.to_str().expect("Cannot convert path to string");
+            let filename = p.to_str().unwrap_or_default();
             let mut new_filename = None;
             for (re, abbrev) in &SYMBOL_REGEXES.filename_res {
                 let replaced = re.replace(filename, *abbrev);
