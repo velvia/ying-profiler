@@ -201,7 +201,7 @@ impl StackStats {
         }
     }
 
-    /// The number of "retained" bytes as seen by this profiler from sampling
+    /// The number of "retained" bytes as seen by this stack from sampling
     pub fn retained_profiled_bytes(&self) -> u64 {
         // NOTE: saturating_sub here is really important, freed could be slightly bigger than allocated
         self.allocated_bytes.saturating_sub(self.freed_bytes)
