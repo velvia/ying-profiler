@@ -8,6 +8,7 @@ use regex::Regex;
 use wyhash::WyHash;
 
 use super::*;
+use crate::histogram::MillisHistogram;
 
 pub(crate) const MAX_NUM_FRAMES: usize = 30;
 
@@ -215,5 +216,89 @@ impl From<&BacktraceSymbol> for FriendlySymbol {
             shorter_filename,
             line_no,
         }
+    }
+}
+
+/// Central struct collecting stats about each stack trace
+#[derive(Debug, Clone)]
+pub struct StackStats {
+    stack: StdCallstack,
+    pub allocated_bytes: u64,
+    pub num_allocations: u64,
+    pub freed_bytes: u64,
+    pub num_frees: u64,
+    hist: MillisHistogram,
+    #[cfg(feature = "profile-spans")]
+    span: tracing::Span,
+}
+
+impl StackStats {
+    // Constructor not public.  Only this crate should create new stats.
+    pub(crate) fn new(stack: StdCallstack, initial_alloc_bytes: Option<u64>) -> Self {
+        Self {
+            stack,
+            allocated_bytes: initial_alloc_bytes.unwrap_or(0),
+            num_allocations: initial_alloc_bytes.map(|_| 1).unwrap_or(0),
+            freed_bytes: 0,
+            num_frees: 0,
+            hist: MillisHistogram::new(),
+            #[cfg(feature = "profile-spans")]
+            span: tracing::Span::current(),
+        }
+    }
+
+    /// Update stats when an allocation is freed
+    pub(crate) fn update_free_stats(&mut self, size: u64, alloc_time_ms: u64) {
+        self.num_frees += 1;
+        self.freed_bytes += size;
+        self.hist.add_sample(alloc_time_ms);
+    }
+
+    /// The number of "retained" bytes as seen by this stack from sampling
+    pub fn retained_profiled_bytes(&self) -> u64 {
+        // NOTE: saturating_sub here is really important, freed could be slightly bigger than allocated
+        self.allocated_bytes.saturating_sub(self.freed_bytes)
+    }
+
+    /// Create a rich multi-line report of this StackStats
+    /// * filename - include source filename in stack trace
+    pub fn rich_report(&self, with_filenames: bool) -> String {
+        let profiled_alloc_bytes = YingProfiler::profiled_bytes_allocated();
+        let pct = (self.allocated_bytes as f64) * 100.0 / (profiled_alloc_bytes as f64);
+        let mut report = format!(
+            "{} profiled bytes allocated ({pct:.2}%) ({} allocations)\n",
+            self.allocated_bytes, self.num_allocations
+        );
+        let retained = self.retained_profiled_bytes();
+        let _ = writeln!(
+            &mut report,
+            "  {} profiled bytes retained  ({} frees)",
+            retained, self.num_frees
+        );
+        let retained_pct_allocs = (retained as f64) * 100.0 / (self.allocated_bytes as f64);
+        let retained_pct_all =
+            (retained as f64) * 100.0 / YingProfiler::profiled_bytes_retained() as f64;
+        let _ = writeln!(
+            &mut report,
+            "    ({retained_pct_all:.2}% of all retained profiled allocs) ({retained_pct_allocs:.2}% of allocated bytes)",
+        );
+        let _ = writeln!(&mut report, "  {}", self.hist);
+
+        #[cfg(feature = "profile-spans")]
+        if !self.span.is_disabled() {
+            let _ = writeln!(&mut report, "\ttracing span id: {:?}", self.span.id());
+        }
+
+        // TODO: this won't be needed once we upgrade from dashmap to something which does atomic reads
+        // Also try to make locking or accesses more fine grained
+        lock_out_profiler(|| {
+            let decorated_stack = if with_filenames {
+                self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
+            } else {
+                self.stack.with_symbols(&YING_STATE.symbol_map)
+            };
+            let _ = writeln!(&mut report, "{}", decorated_stack);
+        });
+        report
     }
 }
