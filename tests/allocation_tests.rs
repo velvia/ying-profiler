@@ -36,7 +36,7 @@ fn basic_allocation_free_test() {
 
     let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
     for s in &top_stacks {
-        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false));
+        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false, true));
     }
     assert!(top_stacks.len() >= 1);
 
@@ -61,7 +61,7 @@ fn basic_allocation_free_test() {
     let stat = &top_stacks[0];
     println!(
         "\n---xxx after dropping xxx---\n{}",
-        stat.rich_report(&YING_ALLOC, false)
+        stat.rich_report(&YING_ALLOC, false, true)
     );
 
     // Number of freed bytes should be roughly half
@@ -99,7 +99,7 @@ fn test_print_allocations_deadlock() {
 
     for s in &top_stacks {
         // This should generate a bunch of allocations, which should cause potential deadlocks
-        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false));
+        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false, false));
     }
 }
 
@@ -120,7 +120,7 @@ async fn stress_test() {
                 writeln!(
                     &mut report_str,
                     "---\n{}\n",
-                    s.rich_report(&YING_ALLOC, true)
+                    s.rich_report(&YING_ALLOC, true, false)
                 )
                 .unwrap();
             }

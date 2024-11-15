@@ -28,9 +28,19 @@ pub struct ProfilerRunner {
     report_pct_change_trigger: usize,
     /// Path to write top retained memory reports to
     reporting_path: PathBuf,
+    /// Expand inlined call stack symbols with a > ?
+    expand_frames: bool,
 }
 
 const INITIAL_RETAINED_MEM_MB: usize = 20;
+
+/// Creates a new ProfilerRunner with default values.  Writes reports to current directory, does not expand frames,
+/// every 5 minute checks on memory, 10% change triggers report.
+impl Default for ProfilerRunner {
+    fn default() -> Self {
+        Self::new(300, 10, "", false)
+    }
+}
 
 impl ProfilerRunner {
     /// Creates a new ProfilerRunner with specific parameters
@@ -38,17 +48,14 @@ impl ProfilerRunner {
         check_interval_secs: usize,
         report_pct_change_trigger: usize,
         reporting_path: &str,
+        expand_frames: bool,
     ) -> Self {
         Self {
             check_interval_secs,
             report_pct_change_trigger,
             reporting_path: PathBuf::from(reporting_path),
+            expand_frames,
         }
-    }
-
-    /// Creates a new ProfilerRunner with default values
-    pub fn default() -> Self {
-        Self::new(300, 10, "")
     }
 
     /// Spawn a new background thread to run profiler and get stats
@@ -56,6 +63,7 @@ impl ProfilerRunner {
         let check_interval_secs = self.check_interval_secs;
         let report_pct_change_trigger = self.report_pct_change_trigger;
         let reporting_path = self.reporting_path.clone();
+        let expand_frames = self.expand_frames;
         let profiler2 = profiler;
 
         std::thread::spawn(move || {
@@ -86,7 +94,7 @@ impl ProfilerRunner {
                     let top_stacks = profiler2.top_k_stacks_by_retained(10);
                     for s in &top_stacks {
                         // In case the app does not use log, we still output to STDOUT the report
-                        println!("---\n{}\n", s.rich_report(profiler2, false));
+                        println!("---\n{}\n", s.rich_report(profiler2, false, expand_frames));
                     }
 
                     // Formulate profiling filename based on ISO8601 timestamp and number of MBs
@@ -98,7 +106,11 @@ impl ProfilerRunner {
                     report_path.push(dump_name);
                     if let Ok(f) = File::create(&report_path) {
                         for s in &top_stacks {
-                            let _ = writeln!(&f, "---\n{}\n", s.rich_report(profiler2, false));
+                            let _ = writeln!(
+                                &f,
+                                "---\n{}\n",
+                                s.rich_report(profiler2, false, expand_frames)
+                            );
                         }
                     } else {
                         error!("Error: could not write memory report to {:?}", &report_path);

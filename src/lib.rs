@@ -59,9 +59,9 @@ use callstack::{FriendlySymbol, StackStats, StdCallstack};
 /// depending on the implementation.
 /// For release/bench builds with debug = 1 / strip = none, this should be 4.
 /// For debug builds, this is about 9.
-const TOP_FRAMES_TO_SKIP: usize = 4;
+const TOP_FRAMES_TO_SKIP: usize = 3;
 
-const DEFAULT_GIANT__ALLOC_LIMIT: usize = 64 * 1024 * 1024 * 1024;
+const DEFAULT_GIANT_ALLOC_LIMIT: usize = 64 * 1024 * 1024 * 1024;
 
 // A map for caching symbols in backtraces so we can mostly store u64's
 type SymbolMap = DashMap<u64, Vec<FriendlySymbol>>;
@@ -97,7 +97,7 @@ impl YingProfiler {
     pub const fn default() -> Self {
         Self {
             sampling_ratio: 500,
-            single_alloc_limit: DEFAULT_GIANT__ALLOC_LIMIT,
+            single_alloc_limit: DEFAULT_GIANT_ALLOC_LIMIT,
             tl_cache: YingLocalCache::new(),
             state: OnceCell::new(),
         }
@@ -216,7 +216,7 @@ impl YingProfiler {
                 stack.populate_symbol_map(&mut bt, &state.symbol_map);
                 println!(
                     "Stack trace:\n{}",
-                    stack.with_symbols_and_filename(&state.symbol_map)
+                    stack.with_symbols_and_filename(&state.symbol_map, true)
                 );
             });
             std::ptr::null_mut::<u8>()
@@ -228,7 +228,7 @@ impl YingProfiler {
     #[inline]
     fn get_state(&self) -> &YingState {
         // We need to lock out the profiler here, to ensure no tracking of allocations or messes
-        self.lock_out_profiler(|| self.state.get_or_init(|| YingState::new()))
+        self.lock_out_profiler(|| self.state.get_or_init(YingState::new))
     }
 
     #[inline]
@@ -298,6 +298,7 @@ impl YingLocalCache {
 
     /// Returns the [YingThreadLocal] for the current thread.
     /// Note that this returns a mut ref, even though this is &self.
+    #[allow(clippy::mut_from_ref)]
     #[inline]
     fn get_thread_local(&self) -> &mut YingThreadLocal {
         let r = &self.local_states[hash_usize(thread_id()) % YING_CACHE_SIZE];
@@ -374,7 +375,7 @@ impl YingThreadLocal {
 
 #[cfg(unix)]
 pub(crate) fn thread_id() -> usize {
-    unsafe { libc::pthread_self().try_into().unwrap() }
+    unsafe { libc::pthread_self() }
 }
 
 #[cfg(windows)]

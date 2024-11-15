@@ -56,7 +56,7 @@ async fn cache_update_loop() {
     let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(10);
     // let top_stacks = YING_ALLOC.top_k_stacks_by_retained(10);
     for s in &top_stacks {
-        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false));
+        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false, false));
     }
 }
 

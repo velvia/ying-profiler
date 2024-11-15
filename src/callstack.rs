@@ -72,15 +72,18 @@ impl<const NF: usize> Callstack<NF> {
 
     /// Obtains a DecoratedCallstack for display.
     /// `println!("{}", cb.with_symbols(symbols));`
+    /// Set expand_frame to true to print out stack details with   > symbols
     pub fn with_symbols<'s, 'm>(
         &'s self,
         symbols: &'m SymbolMap,
+        expand_frame: bool,
     ) -> DecoratedCallstack<'s, 'm, NF> {
         DecoratedCallstack {
             cb: self,
             symbols,
             filename_info: false,
             filter_poll: true,
+            expand_frame,
         }
     }
 
@@ -89,21 +92,30 @@ impl<const NF: usize> Callstack<NF> {
     pub fn with_symbols_and_filename<'s, 'm>(
         &'s self,
         symbols: &'m SymbolMap,
+        expand_frame: bool,
     ) -> DecoratedCallstack<'s, 'm, NF> {
         DecoratedCallstack {
             cb: self,
             symbols,
             filename_info: true,
             filter_poll: true,
+            expand_frame,
         }
     }
 }
 
+/// [DecoratedCallstack] enables detailed stack trace printouts.
+/// Each callstack consists of multiple frames, parent frame calls the child frame so on.
+/// Each frame may expand to include multiple symbols, especially due to inlining.
+/// - `filename_info` - if True, prints out source filename info
+/// - `filter_poll` - if True, skips symbols in the frame which have `::poll::` in them
+/// - `expand_frame` - if False, does not print out inlined symbols at all
 pub struct DecoratedCallstack<'cb, 's, const NF: usize> {
     cb: &'cb Callstack<NF>,
     symbols: &'s SymbolMap,
     filename_info: bool,
     filter_poll: bool,
+    expand_frame: bool,
 }
 
 impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> {
@@ -114,7 +126,7 @@ impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> 
                 if !symbols.is_empty() {
                     writeln!(f, "  {}", stringify_symbol(&symbols[0], self.filename_info))?;
                     // Don't expand inlined `::poll::` subcalls, they aren't interesting
-                    if !symbols[0].is_poll {
+                    if self.expand_frame && !symbols[0].is_poll {
                         for s in &symbols[1..] {
                             if self.filter_poll && s.is_poll {
                                 continue;
@@ -261,8 +273,15 @@ impl StackStats {
     }
 
     /// Create a rich multi-line report of this StackStats
-    /// * filename - include source filename in stack trace
-    pub fn rich_report(&self, profiler: &YingProfiler, with_filenames: bool) -> String {
+    /// * profiler: The `&YING_ALLOC` or global static defined to enable this profiler
+    /// * with_filenames - if True, include source filename in stack trace
+    /// * expand_frame - if True, include inlined symbols for each frame in each stack trace
+    pub fn rich_report(
+        &self,
+        profiler: &YingProfiler,
+        with_filenames: bool,
+        expand_frame: bool,
+    ) -> String {
         let profiled_alloc_bytes = YingProfiler::profiled_bytes_allocated();
         let pct = (self.allocated_bytes as f64) * 100.0 / (profiled_alloc_bytes as f64);
         let mut report = format!(
@@ -294,9 +313,10 @@ impl StackStats {
         profiler.lock_out_profiler(|| {
             let decorated_stack = if with_filenames {
                 self.stack
-                    .with_symbols_and_filename(&profiler.get_state().symbol_map)
+                    .with_symbols_and_filename(&profiler.get_state().symbol_map, expand_frame)
             } else {
-                self.stack.with_symbols(&profiler.get_state().symbol_map)
+                self.stack
+                    .with_symbols(&profiler.get_state().symbol_map, expand_frame)
             };
             let _ = writeln!(&mut report, "{}", decorated_stack);
         });

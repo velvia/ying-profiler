@@ -2,7 +2,7 @@
 
 Ying is a native Rust memory profiler, built to be efficient in production and yield good insight for asynchronous Rust programs.  Ying(鷹) is Chinese for eagle.  🦅🦅🦅
 
-I started this experiment because existing solutions I looked at were either consuming too much resources, or 
+I started this experiment because existing solutions I looked at were either consuming too much resources, or
 wrote profiling files that were too large or too cumbersome to consume, or were very bad at producing useful
 stack traces especially for Rust async programs.
 
@@ -34,7 +34,7 @@ static YING_ALLOC: YingProfiler = YingProfiler::default();
 ## Roadmap
 
 0.1.0:
-- Track span information (need feature XXYY) in stacks
+- Track span information (need feature profile_spans) in stacks
 - Track retained memory, including reallocs
 - Get top stack traces by total allocation
 - Get top traces by retained allocation
