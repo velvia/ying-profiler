@@ -262,7 +262,7 @@ impl StackStats {
 
     /// Create a rich multi-line report of this StackStats
     /// * filename - include source filename in stack trace
-    pub fn rich_report(&self, with_filenames: bool) -> String {
+    pub fn rich_report(&self, profiler: &YingProfiler, with_filenames: bool) -> String {
         let profiled_alloc_bytes = YingProfiler::profiled_bytes_allocated();
         let pct = (self.allocated_bytes as f64) * 100.0 / (profiled_alloc_bytes as f64);
         let mut report = format!(
@@ -291,11 +291,12 @@ impl StackStats {
 
         // TODO: this won't be needed once we upgrade from dashmap to something which does atomic reads
         // Also try to make locking or accesses more fine grained
-        lock_out_profiler(|| {
+        profiler.lock_out_profiler(|| {
             let decorated_stack = if with_filenames {
-                self.stack.with_symbols_and_filename(&YING_STATE.symbol_map)
+                self.stack
+                    .with_symbols_and_filename(&profiler.get_state().symbol_map)
             } else {
-                self.stack.with_symbols(&YING_STATE.symbol_map)
+                self.stack.with_symbols(&profiler.get_state().symbol_map)
             };
             let _ = writeln!(&mut report, "{}", decorated_stack);
         });

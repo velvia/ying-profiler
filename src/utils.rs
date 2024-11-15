@@ -52,10 +52,11 @@ impl ProfilerRunner {
     }
 
     /// Spawn a new background thread to run profiler and get stats
-    pub fn spawn(&self) {
+    pub fn spawn(&self, profiler: &'static YingProfiler) {
         let check_interval_secs = self.check_interval_secs;
         let report_pct_change_trigger = self.report_pct_change_trigger;
         let reporting_path = self.reporting_path.clone();
+        let profiler2 = profiler;
 
         std::thread::spawn(move || {
             let mut last_retained_mem = INITIAL_RETAINED_MEM_MB as f64;
@@ -82,10 +83,10 @@ impl ProfilerRunner {
 
                     last_retained_mem = new_allocated;
 
-                    let top_stacks = YingProfiler::top_k_stacks_by_retained(10);
+                    let top_stacks = profiler2.top_k_stacks_by_retained(10);
                     for s in &top_stacks {
                         // In case the app does not use log, we still output to STDOUT the report
-                        println!("---\n{}\n", s.rich_report(false));
+                        println!("---\n{}\n", s.rich_report(profiler2, false));
                     }
 
                     // Formulate profiling filename based on ISO8601 timestamp and number of MBs
@@ -97,7 +98,7 @@ impl ProfilerRunner {
                     report_path.push(dump_name);
                     if let Ok(f) = File::create(&report_path) {
                         for s in &top_stacks {
-                            let _ = writeln!(&f, "---\n{}\n", s.rich_report(false));
+                            let _ = writeln!(&f, "---\n{}\n", s.rich_report(profiler2, false));
                         }
                     } else {
                         error!("Error: could not write memory report to {:?}", &report_path);

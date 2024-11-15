@@ -51,11 +51,12 @@ async fn cache_update_loop() {
         "Profiled bytes allocated: {}",
         YingProfiler::profiled_bytes_allocated()
     );
-    println!("Size of symbol map: {}", YingProfiler::symbol_map_size());
+    println!("Size of symbol map: {}", YING_ALLOC.symbol_map_size());
     // Try changing last param with_filename to true to print out filenames
-    let top_stacks = YingProfiler::top_k_stacks_by_allocated(10);
+    let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(10);
+    // let top_stacks = YING_ALLOC.top_k_stacks_by_retained(10);
     for s in &top_stacks {
-        println!("---\n{}\n", s.rich_report(false));
+        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false));
     }
 }
 

@@ -24,7 +24,7 @@ fn basic_allocation_free_test() {
     std::thread::sleep(Duration::from_millis(100));
 
     // Reset state so mixing tests isn't a problem
-    ying_profiler::reset_state_for_testing_only();
+    YING_ALLOC.reset_state_for_testing_only();
 
     // Make thousands of allocations by allocating some small items.  Remember this is a sampling
     // profiler, so we need to make enough.
@@ -34,9 +34,9 @@ fn basic_allocation_free_test() {
     let allocated_now = YingProfiler::total_retained_bytes();
     println!("allocated_now = {}", allocated_now);
 
-    let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
+    let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
     for s in &top_stacks {
-        println!("---\n{}\n", s.rich_report(false));
+        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false));
     }
     assert!(top_stacks.len() >= 1);
 
@@ -56,12 +56,12 @@ fn basic_allocation_free_test() {
     // After freeing mmeory - less memory should be allocated
     assert!(allocated2 < allocated_now);
 
-    let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
+    let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
     assert!(top_stacks.len() >= 1);
     let stat = &top_stacks[0];
     println!(
         "\n---xxx after dropping xxx---\n{}",
-        stat.rich_report(false)
+        stat.rich_report(&YING_ALLOC, false)
     );
 
     // Number of freed bytes should be roughly half
@@ -91,33 +91,38 @@ fn test_print_allocations_deadlock() {
     // profiler, so we need to make enough.
     let _items: Vec<_> = (0..NUM_ALLOCS).map(|_n| Box::new([0u64; 64])).collect();
 
-    let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
+    let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
 
     // Reset counter to guarantee next allocation will sample
     println!("before potential deadlock");
-    ying_profiler::testing_only_guarantee_next_sample();
+    YING_ALLOC.testing_only_guarantee_next_sample();
 
     for s in &top_stacks {
         // This should generate a bunch of allocations, which should cause potential deadlocks
-        println!("---\n{}\n", s.rich_report(false));
+        println!("---\n{}\n", s.rich_report(&YING_ALLOC, false));
     }
 }
 
 #[tokio::test]
 #[serial]
 async fn stress_test() {
-    ying_profiler::reset_state_for_testing_only();
+    YING_ALLOC.reset_state_for_testing_only();
 
     // Spin up tons of allocations in a bunch of threads.
     // At the same time, spin up a task which is repeatedly printing alloc reports into a string
     // buffer - thus forcing allocator to be updating and separately reading all the time.
     let dump_allocs_handle = std::thread::spawn(|| {
         for _ in 0..4000 {
-            let top_stacks = YingProfiler::top_k_stacks_by_allocated(10);
+            let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(10);
             // Big growing allocation here for string report
             let mut report_str = String::new();
             for s in &top_stacks {
-                writeln!(&mut report_str, "---\n{}\n", s.rich_report(true)).unwrap();
+                writeln!(
+                    &mut report_str,
+                    "---\n{}\n",
+                    s.rich_report(&YING_ALLOC, true)
+                )
+                .unwrap();
             }
         }
         println!("Finished dumping reports...");
@@ -158,7 +163,7 @@ async fn stress_test() {
 
     dump_allocs_handle.join().expect("Cannot wait for thread");
 
-    let top_stacks = YingProfiler::top_k_stacks_by_allocated(5);
+    let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
     for s in &top_stacks {
         // println!("---\n{}\n", s.rich_report(false));
     }
