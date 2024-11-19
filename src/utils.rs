@@ -1,3 +1,7 @@
+use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::time::Duration;
 /// Utilities for apps using YingProfiler.
 /// Most importantly, a ProfilerRunner that spawns a background thread that periodically
 /// 1. Dumps out top retained memory stats to both logs and disk
@@ -11,11 +15,11 @@
 ///     use ying_profiler::utils::ProfilerRunner;
 ///     ProfilerRunner::default().spawn();
 /// }}}
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{fs::File, io::Cursor};
 
+use callstack::Measurement;
+use inferno::collapse::{dtrace, Collapse};
+use inferno::flamegraph;
 use log::{error, info};
 
 use super::*;
@@ -119,4 +123,59 @@ impl ProfilerRunner {
             }
         });
     }
+}
+
+/// Function to produce a FlameGraph file to a specific path.
+/// Specify whether to measure retained or allocated bytes, and the path to write flamegraph file to
+/// (should probably end in .svg)
+pub fn gen_flamegraph(
+    profiler: &YingProfiler,
+    measurement: Measurement,
+    path: &PathBuf,
+) -> Result<(), String> {
+    // Generate dtrace-compatible output
+    let mut report = String::new();
+    match measurement {
+        Measurement::RetainedBytes => {
+            let top_stacks = profiler.top_k_stacks_by_retained(50);
+            for s in &top_stacks {
+                writeln!(
+                    &mut report,
+                    "{}",
+                    s.dtrace_report(profiler, Measurement::RetainedBytes)
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        Measurement::AllocatedBytes => {
+            let top_stacks = profiler.top_k_stacks_by_allocated(50);
+            for s in &top_stacks {
+                writeln!(
+                    &mut report,
+                    "{}",
+                    s.dtrace_report(profiler, Measurement::AllocatedBytes)
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Fold/collapse output to folded lines
+    let mut folder = dtrace::Folder::default();
+    let mut folded_buf = Vec::new();
+    let folded_out = Cursor::new(&mut folded_buf);
+    folder
+        .collapse(Cursor::new(report), folded_out)
+        .map_err(|e| e.to_string())?;
+
+    // Now, generate the flamegraph from folded lines
+    if let Ok(f) = File::create(path) {
+        flamegraph::from_reader(
+            &mut flamegraph::Options::default(),
+            Cursor::new(&folded_buf),
+            f,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

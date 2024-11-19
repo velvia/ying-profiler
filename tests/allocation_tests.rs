@@ -7,6 +7,8 @@ use moka::sync::Cache;
 use rand::distributions::Alphanumeric;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serial_test::serial;
+use ying_profiler::callstack::Measurement;
+// use ying_profiler::utils::gen_flamegraph;
 use ying_profiler::YingProfiler;
 
 #[cfg(test)]
@@ -166,8 +168,14 @@ async fn stress_test() {
     let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
     for s in &top_stacks {
         // println!("---\n{}\n", s.rich_report(false));
+        println!(
+            "{}",
+            s.dtrace_report(&YING_ALLOC, Measurement::RetainedBytes)
+        );
     }
     assert!(top_stacks.len() >= 1);
+
+    // gen_flamegraph(&YING_ALLOC, Measurement::RetainedBytes, &std::path::PathBuf::from("flame.svg")).unwrap();
 
     // At sampling every 5 allocations, we should have at least outer*inner/5 allocations in the 5 stacks,
     // probably times constant factor of at least 2, plus frees

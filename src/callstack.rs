@@ -84,6 +84,7 @@ impl<const NF: usize> Callstack<NF> {
             filename_info: false,
             filter_poll: true,
             expand_frame,
+            write_header: true,
         }
     }
 
@@ -100,6 +101,22 @@ impl<const NF: usize> Callstack<NF> {
             filename_info: true,
             filter_poll: true,
             expand_frame,
+            write_header: true,
+        }
+    }
+
+    /// Obtains a DecoratedCallstack for display with symbols with no inline expansion and no header.
+    pub fn with_symbols_no_inline_header<'s, 'm>(
+        &'s self,
+        symbols: &'m SymbolMap,
+    ) -> DecoratedCallstack<'s, 'm, NF> {
+        DecoratedCallstack {
+            cb: self,
+            symbols,
+            filename_info: false,
+            filter_poll: true,
+            expand_frame: false,
+            write_header: false,
         }
     }
 }
@@ -110,17 +127,21 @@ impl<const NF: usize> Callstack<NF> {
 /// - `filename_info` - if True, prints out source filename info
 /// - `filter_poll` - if True, skips symbols in the frame which have `::poll::` in them
 /// - `expand_frame` - if False, does not print out inlined symbols at all
+/// - `write_header` - if True, adds "Callback <hash = 0x..>" header as the first line
 pub struct DecoratedCallstack<'cb, 's, const NF: usize> {
     cb: &'cb Callstack<NF>,
     symbols: &'s SymbolMap,
     filename_info: bool,
     filter_poll: bool,
     expand_frame: bool,
+    write_header: bool,
 }
 
 impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Callback <hash = 0x{:0x}>", self.cb.compute_hash())?;
+        if self.write_header {
+            writeln!(f, "Callback <hash = 0x{:0x}>", self.cb.compute_hash())?;
+        }
         for ip in &self.cb.frames {
             if let Some(symbols) = self.symbols.get(ip) {
                 if !symbols.is_empty() {
@@ -231,6 +252,11 @@ impl From<&BacktraceSymbol> for FriendlySymbol {
     }
 }
 
+pub enum Measurement {
+    AllocatedBytes,
+    RetainedBytes,
+}
+
 /// Central struct collecting stats about each stack trace
 #[derive(Debug, Clone)]
 pub struct StackStats {
@@ -320,6 +346,30 @@ impl StackStats {
             };
             let _ = writeln!(&mut report, "{}", decorated_stack);
         });
+        report
+    }
+
+    /// Creates a really simple dtrace-compatible multi line string report, with a single measurement at the end.
+    /// An empty line will be appended at the end.
+    /// DTrace reports always have inlining > turned off.
+    ///
+    /// * profiler: The `&YING_ALLOC` or global static defined to enable this profiler
+    /// * measurement - enum for what to measure, allocated bytes or retained bytes
+    pub fn dtrace_report(&self, profiler: &YingProfiler, measurement: Measurement) -> String {
+        let metric = match measurement {
+            Measurement::AllocatedBytes => self.allocated_bytes,
+            Measurement::RetainedBytes => self.retained_profiled_bytes(),
+        };
+
+        let mut report = String::new();
+        profiler.lock_out_profiler(|| {
+            let decorated_stack = self
+                .stack
+                .with_symbols_no_inline_header(&profiler.get_state().symbol_map);
+            let _ = write!(&mut report, "{}", decorated_stack);
+        });
+
+        let _ = writeln!(&mut report, "  {}", metric);
         report
     }
 }
