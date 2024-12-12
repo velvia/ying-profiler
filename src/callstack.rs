@@ -252,6 +252,7 @@ impl From<&BacktraceSymbol> for FriendlySymbol {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum Measurement {
     AllocatedBytes,
     RetainedBytes,

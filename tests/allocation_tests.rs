@@ -40,7 +40,7 @@ fn basic_allocation_free_test() {
     for s in &top_stacks {
         println!("---\n{}\n", s.rich_report(&YING_ALLOC, false, true));
     }
-    assert!(top_stacks.len() >= 1);
+    assert!(!top_stacks.is_empty());
 
     // The top stat should be for our allocations
     let stat = &top_stacks[0];
@@ -59,7 +59,7 @@ fn basic_allocation_free_test() {
     assert!(allocated2 < allocated_now);
 
     let top_stacks = YING_ALLOC.top_k_stacks_by_allocated(5);
-    assert!(top_stacks.len() >= 1);
+    assert!(!top_stacks.is_empty());
     let stat = &top_stacks[0];
     println!(
         "\n---xxx after dropping xxx---\n{}",
@@ -173,7 +173,7 @@ async fn stress_test() {
             s.dtrace_report(&YING_ALLOC, Measurement::RetainedBytes)
         );
     }
-    assert!(top_stacks.len() >= 1);
+    assert!(!top_stacks.is_empty());
 
     // gen_flamegraph(&YING_ALLOC, Measurement::RetainedBytes, &std::path::PathBuf::from("flame.svg")).unwrap();
 

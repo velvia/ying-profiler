@@ -2,47 +2,79 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
-/// Utilities for apps using YingProfiler.
-/// Most importantly, a ProfilerRunner that spawns a background thread that periodically
-/// 1. Dumps out top retained memory stats to both logs and disk
-/// 2. ???
-///
-/// Note that ProfilerRunner uses log framework to periodically dump out logs.  The app is responsible
-/// for initializing the logging infrastructure.
-///
-/// To run:
-/// {{{
-///     use ying_profiler::utils::ProfilerRunner;
-///     ProfilerRunner::default().spawn();
-/// }}}
 use std::{fs::File, io::Cursor};
 
 use callstack::Measurement;
+use derive_builder::Builder;
 use inferno::collapse::{dtrace, Collapse};
 use inferno::flamegraph;
 use log::{error, info};
 
 use super::*;
 
-/// A background thread that dumps out stats and does other periodic cleanup
+/// A background thread that dumps out stats, flamegraphs, and does other periodic cleanup.
+/// 1. Dumps out top retained memory stats to both logs and disk
+/// 2. Can optionally dump out flamegraphs
+/// 3. Lets you choose between dumping retained or allocated reports/flamegraphs
+///
+/// The runner thread will check the amount of retained memory as estimated by this profiler,
+/// every `check_interval_secs`.  If the retained memory changes from the previous time by more than
+/// `report_pct_change_trigger`, then it will dump out a memory report of the top either retained
+/// or allocated stack traces as a file to the chosen `reporting_path` directory on disk.  The file will
+/// have the ISO8601 timestamp and the amount of retained memory in the filename for convenience.
+/// Optionally, a flamegraph will also be dumped.
+///
+/// Note that ProfilerRunner uses log framework to periodically dump out logs.  The app is responsible
+/// for initializing the logging infrastructure.
+///
+/// To run:
+/// ```
+///     use ying_profiler::{YingProfiler, utils::ProfilerRunner};
+///     static YING_ALLOC: YingProfiler = YingProfiler::default();
+///     ProfilerRunner::default().spawn(&YING_ALLOC);
+/// ```
+///
+/// Builder pattern can also be used.
+/// ```
+///     use ying_profiler::{YingProfiler, utils::ProfilerRunnerBuilder};
+///     static YING_ALLOC: YingProfiler = YingProfiler::default();
+///     let runner = ProfilerRunnerBuilder::default()
+///         .gen_flamegraphs(true)
+///         .reporting_path("profiler_output/")
+///         .build()
+///         .unwrap();
+///      runner.spawn(&YING_ALLOC);
+/// ```
+#[derive(Clone, Debug, PartialEq, Builder)]
+#[builder(setter(into))]
 pub struct ProfilerRunner {
     /// Number of seconds in between memory checks
+    #[builder(default = "300")]
     check_interval_secs: usize,
     /// Percent change in retained memory to trigger a report
+    #[builder(default = "10")]
     report_pct_change_trigger: usize,
     /// Path to write top retained memory reports to
-    reporting_path: PathBuf,
+    #[builder(default)]
+    reporting_path: String,
     /// Expand inlined call stack symbols with a > ?
+    #[builder(default = "false")]
     expand_frames: bool,
+    /// Generate flamegraphs at reporting_path
+    #[builder(default = "false")]
+    gen_flamegraphs: bool,
+    /// True=measure allocated memory instead of False=measure retained memory
+    #[builder(default = "false")]
+    measure_allocated_not_retained: bool,
 }
 
 const INITIAL_RETAINED_MEM_MB: usize = 20;
 
 /// Creates a new ProfilerRunner with default values.  Writes reports to current directory, does not expand frames,
-/// every 5 minute checks on memory, 10% change triggers report.
+/// every 5 minute checks on memory, 10% change triggers report.  No flamegraphs, retained memory.
 impl Default for ProfilerRunner {
     fn default() -> Self {
-        Self::new(300, 10, "", false)
+        Self::new(300, 10, "", false, false, false)
     }
 }
 
@@ -53,12 +85,16 @@ impl ProfilerRunner {
         report_pct_change_trigger: usize,
         reporting_path: &str,
         expand_frames: bool,
+        gen_flamegraphs: bool,
+        measure_allocated_not_retained: bool,
     ) -> Self {
         Self {
             check_interval_secs,
             report_pct_change_trigger,
-            reporting_path: PathBuf::from(reporting_path),
+            reporting_path: reporting_path.to_string(),
             expand_frames,
+            gen_flamegraphs,
+            measure_allocated_not_retained,
         }
     }
 
@@ -66,9 +102,15 @@ impl ProfilerRunner {
     pub fn spawn(&self, profiler: &'static YingProfiler) {
         let check_interval_secs = self.check_interval_secs;
         let report_pct_change_trigger = self.report_pct_change_trigger;
-        let reporting_path = self.reporting_path.clone();
+        let reporting_path = PathBuf::from(self.reporting_path.clone());
         let expand_frames = self.expand_frames;
         let profiler2 = profiler;
+        let measurement = if self.measure_allocated_not_retained {
+            Measurement::AllocatedBytes
+        } else {
+            Measurement::RetainedBytes
+        };
+        let gen_flamegraphs = self.gen_flamegraphs;
 
         std::thread::spawn(move || {
             let mut last_retained_mem = INITIAL_RETAINED_MEM_MB as f64;
@@ -95,7 +137,10 @@ impl ProfilerRunner {
 
                     last_retained_mem = new_allocated;
 
-                    let top_stacks = profiler2.top_k_stacks_by_retained(10);
+                    let top_stacks = match measurement {
+                        Measurement::AllocatedBytes => profiler2.top_k_stacks_by_allocated(10),
+                        Measurement::RetainedBytes => profiler2.top_k_stacks_by_retained(10),
+                    };
                     for s in &top_stacks {
                         // In case the app does not use log, we still output to STDOUT the report
                         println!("---\n{}\n", s.rich_report(profiler2, false, expand_frames));
@@ -118,6 +163,15 @@ impl ProfilerRunner {
                         }
                     } else {
                         error!("Error: could not write memory report to {:?}", &report_path);
+                    }
+
+                    if gen_flamegraphs {
+                        let graph_name = format!("ying.{}.{}MB.svg", dt_str, new_allocated as i64);
+                        let mut graph_path = reporting_path.clone();
+                        graph_path.push(graph_name);
+                        if let Err(e) = gen_flamegraph(profiler2, measurement, &graph_path) {
+                            error!("Error generating flame graph to {:?}: {}", &graph_path, e);
+                        }
                     }
                 }
             }
@@ -178,4 +232,21 @@ pub fn gen_flamegraph(
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_profiler_runner_builder() {
+        let runner = ProfilerRunnerBuilder::default()
+            .gen_flamegraphs(true)
+            .build()
+            .unwrap();
+        assert_eq!(runner.check_interval_secs, 300);
+        assert!(runner.gen_flamegraphs);
+        assert_eq!(runner.report_pct_change_trigger, 10);
+        assert_eq!(runner.reporting_path, "");
+    }
 }
