@@ -1,7 +1,18 @@
 [package]
 name = "ying-profiler"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+authors = ["Evan Chan <velvia@gmail.com>"]
+description = "Sampling retained memory profiler for Rust, low resource usage, can write out flamegraphs."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/velvia/ying-profiler"
+categories = [
+    "development-tools::debugging",
+    "development-tools::profiling",
+    "asynchronous",
+]
+keywords = ["profiling", "sampling", "memory", "profiler", "flamegraph"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

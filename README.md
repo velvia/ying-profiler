@@ -94,6 +94,7 @@ inlined symbols.  Some tools can expand on symbols, but the results still aren't
 ## Roadmap
 
 Future:
+- Use other global allocators under the hood, namely Jemalloc
 - TODO: env var or struct configuration of profiler parameters
 - TODO: separate CLI or utility to analyze them?
 - TOOD: Ability to regularly trim or reset state, to avoid using up too much memory.  eg., long lived allocations that don't get released should just be removed from the outstanding_allocs map.
