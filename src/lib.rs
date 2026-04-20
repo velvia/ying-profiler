@@ -415,7 +415,7 @@ impl YingThreadLocal {
 
 #[cfg(unix)]
 pub(crate) fn thread_id() -> usize {
-    unsafe { libc::pthread_self() }
+    unsafe { libc::pthread_self() as usize }
 }
 
 #[cfg(windows)]
