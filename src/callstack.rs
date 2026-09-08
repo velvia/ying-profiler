@@ -5,6 +5,8 @@ use std::hash::Hasher;
 use backtrace::BacktraceSymbol;
 use once_cell::sync::Lazy;
 use regex::Regex;
+#[cfg(feature = "profile-spans")]
+use tracing::Span;
 use wyhash::WyHash;
 
 use super::*;
@@ -27,7 +29,7 @@ pub struct Callstack<const NF: usize> {
 
 impl<const NF: usize> Callstack<NF> {
     /// Creates a Callback from a backtrace::Backtrace, preferably unresolved for speed
-    pub fn from_backtrace_unresolved(bt: &backtrace::Backtrace) -> Self {
+    pub fn from_backtrace_unresolved(bt: &Backtrace) -> Self {
         let mut cb = Self { frames: [0; NF] };
         for i in TOP_FRAMES_TO_SKIP..(bt.frames().len().min(NF)) {
             cb.frames[i - TOP_FRAMES_TO_SKIP] = bt.frames()[i].ip() as u64;
@@ -44,7 +46,7 @@ impl<const NF: usize> Callstack<NF> {
     /// Goes through the IPs stored and ensures that the symbol map has resolved symbols for
     /// all of them.  If it does not, resolves the backtrace symbols and updates the symbol map.
     /// Potentially very expensive due to resolving IPs
-    pub fn populate_symbol_map(&self, bt: &mut backtrace::Backtrace, symbol_map: &SymbolMap) {
+    pub(crate) fn populate_symbol_map(&self, bt: &mut Backtrace, symbol_map: &SymbolMap) {
         // For each IP in our trace that is not zero
         for (i, ip) in self.frames.iter().enumerate() {
             if *ip == 0 {
@@ -53,7 +55,7 @@ impl<const NF: usize> Callstack<NF> {
 
             // This is a concurrent hash map. It's OK for the contains/insert to not be atomic,
             // because for each IP the symbol should be identical, so multiple inserts are idempotent.
-            if !symbol_map.contains_key(ip) {
+            if !symbol_map.contains_key(*ip) {
                 // IP not there. Get the corresponding frame from the backtrace
                 let frame = &bt.frames()[i + TOP_FRAMES_TO_SKIP];
 
@@ -73,7 +75,7 @@ impl<const NF: usize> Callstack<NF> {
     /// Obtains a DecoratedCallstack for display.
     /// `println!("{}", cb.with_symbols(symbols));`
     /// Set expand_frame to true to print out stack details with   > symbols
-    pub fn with_symbols<'s, 'm>(
+    pub(crate) fn with_symbols<'s, 'm>(
         &'s self,
         symbols: &'m SymbolMap,
         expand_frame: bool,
@@ -90,7 +92,7 @@ impl<const NF: usize> Callstack<NF> {
 
     /// Obtains a DecoratedCallstack for display with both symbol and filename/lineno info.
     /// `println!("{}", cb.with_symbols_and_filename(symbols));`
-    pub fn with_symbols_and_filename<'s, 'm>(
+    pub(crate) fn with_symbols_and_filename<'s, 'm>(
         &'s self,
         symbols: &'m SymbolMap,
         expand_frame: bool,
@@ -106,7 +108,7 @@ impl<const NF: usize> Callstack<NF> {
     }
 
     /// Obtains a DecoratedCallstack for display with symbols with no inline expansion and no header.
-    pub fn with_symbols_no_inline_header<'s, 'm>(
+    pub(crate) fn with_symbols_no_inline_header<'s, 'm>(
         &'s self,
         symbols: &'m SymbolMap,
     ) -> DecoratedCallstack<'s, 'm, NF> {
@@ -143,20 +145,25 @@ impl<'cb, 's, const NF: usize> fmt::Display for DecoratedCallstack<'cb, 's, NF> 
             writeln!(f, "Callback <hash = 0x{:0x}>", self.cb.compute_hash())?;
         }
         for ip in &self.cb.frames {
-            if let Some(symbols) = self.symbols.get(ip) {
-                if !symbols.is_empty() {
-                    writeln!(f, "  {}", stringify_symbol(&symbols[0], self.filename_info))?;
-                    // Don't expand inlined `::poll::` subcalls, they aren't interesting
-                    if self.expand_frame && !symbols[0].is_poll {
-                        for s in &symbols[1..] {
-                            if self.filter_poll && s.is_poll {
-                                continue;
-                            }
-                            writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
+            self.symbols.with_value(*ip, |maybe_symbols| {
+                let Some(symbols) = maybe_symbols else {
+                    return Ok(());
+                };
+                if symbols.is_empty() {
+                    return Ok(());
+                }
+                writeln!(f, "  {}", stringify_symbol(&symbols[0], self.filename_info))?;
+                // Don't expand inlined `::poll::` subcalls, they aren't interesting
+                if self.expand_frame && !symbols[0].is_poll {
+                    for s in &symbols[1..] {
+                        if self.filter_poll && s.is_poll {
+                            continue;
                         }
+                        writeln!(f, "    > {}", stringify_symbol(s, self.filename_info))?;
                     }
                 }
-            }
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -268,7 +275,7 @@ pub struct StackStats {
     pub num_frees: u64,
     hist: MillisHistogram,
     #[cfg(feature = "profile-spans")]
-    span: tracing::Span,
+    span: Span,
 }
 
 impl StackStats {
@@ -282,7 +289,7 @@ impl StackStats {
             num_frees: 0,
             hist: MillisHistogram::new(),
             #[cfg(feature = "profile-spans")]
-            span: tracing::Span::current(),
+            span: Span::current(),
         }
     }
 

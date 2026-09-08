@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - uses: taiki-e/install-action@nextest
+
+      # Every test step needs its own timeout.  An allocator deadlock can wedge the test binary
+      # during startup, before nextest gets far enough to apply a per-test timeout, and the job
+      # would otherwise sit there until the six hour default.
+      - name: Test
+        timeout-minutes: 10
+        run: cargo nextest run --release --all-features
+
+      - name: Doc tests
+        timeout-minutes: 10
+        run: cargo test --release --doc
+
+      # Catches intra-doc links that go stale when an item is renamed or removed.
+      - name: Docs
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # The deadlocks this crate has had were probabilistic, so a single green run means little.
+      # Tiny map capacities make every shard resize constantly, which is the path that used to
+      # wedge, and repeating the run gives the race enough chances to show up.
+      - name: Deadlock stress (forced map resizes)
+        timeout-minutes: 15
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "--- stress iteration $i ---"
+            cargo nextest run --release --profile stress || exit 1
+          done
+        env:
+          YING_TEST_MAP_CAPACITY: 1
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo check --lib --all-features
+
+  # Ying uses platform-specific APIs to get a thread id without touching TLS, so the non-host
+  # platforms need at least a compile check
+  cross-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - run: cargo check --lib --all-features --target x86_64-pc-windows-msvc

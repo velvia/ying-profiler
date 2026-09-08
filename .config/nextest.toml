@@ -1,0 +1,18 @@
+# A deadlock inside the global allocator wedges the entire test process, so no in-process watchdog
+# can be trusted to report it - once allocation is stuck, so is panicking and printing.  nextest
+# runs each test in its own process and kills it from the outside, which turns a deadlock during a
+# test into a named failure.
+#
+# Known gap, measured rather than assumed: a bad enough re-entrancy bug wedges the test binary
+# during startup, which is nextest's list phase, and no per-test timeout applies there.  CI must
+# also set a step-level timeout so that case fails promptly instead of hanging the job.
+[profile.default]
+slow-timeout = { period = "20s", terminate-after = 6 }
+
+# Profile for the deadlock hunt: these tests are probabilistic, so run them repeatedly.  Pair it
+# with YING_TEST_MAP_CAPACITY=1, which starts every profiler map at zero capacity so the shard
+# resize paths - where the first re-entrancy deadlock lived - run constantly instead of a handful
+# of times per run.
+[profile.stress]
+slow-timeout = { period = "20s", terminate-after = 6 }
+fail-fast = true

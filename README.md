@@ -28,34 +28,100 @@ To see an example which uses Ying and dumps out top stack traces by allocations:
 
 ## How to use
 
+Set Ying as the global allocator, then turn on reporting with one line:
+
 ```rust
 use ying_profiler::YingProfiler;
 
 #[global_allocator]
 static YING_ALLOC: YingProfiler = YingProfiler::default();
+
+fn main() {
+    YING_ALLOC.start_profiling();
+    // ... the rest of your program
+}
 ```
 
-The above sets Ying as the global allocator but does not dump out any profiles or stats.  Underneath Ying collects stats and defers to the original System global allocator.
+There are three layers here, and it is worth knowing which one you are using.
 
-To dump out stats, one can use methods in `YingProfiler`, but the easiest way is to use `ProfilerRunner`, which starts up a background thread, checks memory use stats, and dumps out reports if the change in memory usage exceeds some threshold.  The default checks every 5 minutes and dumps out a report if the retained memory changes by more than 10%.  Options include a path to write out the text reports to, and if inlined stack frames should be expanded in the reports.
+### 1. The allocator: collects, never reports
+
+The `#[global_allocator]` declaration is what makes Ying sample allocations at all.  On its own it is complete and valid: Ying accumulates stats in memory and defers to the System allocator, but writes nothing anywhere.  Nothing is scheduled and no thread is spawned.
+
+### 2. `ProfilerRunner`: the primitive that decides how stats get reported
+
+`ProfilerRunner` is the piece to reach for whenever the defaults do not fit.  It owns every decision about turning collected stats into output — how often to look, how much of a change is worth reporting, what to measure, where output goes, and in what form:
+
+| Setting | Meaning |
+|---|---|
+| `check_interval_secs` | how often the background thread wakes up to compare memory use |
+| `report_pct_change_trigger` | how much retained memory must move before a report is written |
+| `reporting_path` | directory for reports and flamegraphs; created if missing |
+| `measure_allocated_not_retained` | rank stacks by total allocated bytes instead of retained |
+| `gen_flamegraphs` | also write an SVG flamegraph alongside each text report |
+| `expand_frames` | expand inlined symbols within each stack frame in reports |
+
+Build one with `ProfilerRunnerBuilder`, which defaults anything you leave out, then hand it the allocator static to start its thread:
 
 ```rust
-    use ying_profiler::utils::ProfilerRunner;
-    ProfilerRunner::default().spawn(&YING_ALLOC);
-```
+use ying_profiler::{utils::ProfilerRunnerBuilder, YingProfiler};
 
-One can also use `ProfilerRunner` to dump out flamegraphs:
+#[global_allocator]
+static YING_ALLOC: YingProfiler = YingProfiler::default();
 
-```rust
-    use ying_profiler::{YingProfiler, utils::ProfilerRunnerBuilder};
-    static YING_ALLOC: YingProfiler = YingProfiler::default();
+fn main() {
     let runner = ProfilerRunnerBuilder::default()
+        .check_interval_secs(60usize)
+        .report_pct_change_trigger(5usize)
+        .reporting_path("/var/log/ying")
         .gen_flamegraphs(true)
-        .reporting_path("profiler_output/")
         .build()
         .unwrap();
-     runner.spawn(&YING_ALLOC);
+    runner.spawn(&YING_ALLOC);
+}
 ```
+
+`start_profiling` is not a separate mechanism: it builds exactly one of these with a specific set of values (5 minute interval, 10% trigger, flamegraphs on, retained memory, output to `ying-profiles`) and spawns it.  Anything it can do, a `ProfilerRunner` you build yourself can do too.
+
+### 3. Reading stats directly
+
+You do not need a runner at all if you would rather decide when to look.  `YingProfiler` exposes the stats as data — `top_k_stacks_by_retained`, `top_k_stacks_by_allocated`, `total_retained_bytes` — and `utils::gen_flamegraph` writes a one-off flamegraph on demand.  This is the route to take when reports should be triggered by your own signals, such as an HTTP endpoint or a health check noticing memory growth.
+
+## Implementation notes
+
+Ying is the global allocator, so everything Ying allocates re-enters Ying.  Two rules keep that from
+turning into a deadlock, and both matter if you plan to change the code:
+
+1. **The per-thread re-entrancy guard is checked before any profiler state is touched**, in `alloc`,
+   `dealloc` and `realloc` alike.  The profiler's maps allocate and free internally (when a shard
+   resizes, for instance), and those calls land back in the allocator while a shard lock is held.
+   Touching the map first would try to take a lock the same thread already holds.
+2. **The profiler's own maps must not use locks that allocate.**  Ying previously used `DashMap`,
+   whose `RwLock` is built on `parking_lot_core`; `parking_lot_core` allocates its global parking
+   table while holding its internal bucket locks, and that allocation comes back through Ying into
+   DashMap, whose lock slow path then re-enters `parking_lot_core` and deadlocks.  No choice of
+   allocator for the hash table fixes this.  Ying therefore uses a small sharded map built on
+   `std::sync::RwLock`, which never allocates.
+
+## Testing for deadlocks
+
+Every bug this crate has had in the allocator path was a deadlock, and deadlocks are probabilistic:
+one green test run means very little.  Two knobs make them reproducible.
+
+`YING_TEST_MAP_CAPACITY` overrides the initial capacity of every profiler map.  Setting it to `1`
+starts each map at zero capacity so shards resize constantly, and resizing is the path where a map
+allocates and frees while holding its own lock.  With that set, a re-entrancy bug that otherwise
+appears once in tens of runs wedges the process immediately:
+
+```bash
+YING_TEST_MAP_CAPACITY=1 cargo nextest run --release --profile stress
+```
+
+Timeouts must come from outside the process.  Once the allocator is stuck, so is panicking and
+printing, so a test cannot report its own hang.  `cargo nextest` runs each test in a separate
+process and kills it on timeout (see `.config/nextest.toml`), and CI puts a `timeout-minutes` on
+every test step, because a bad enough bug wedges the binary during startup before nextest can apply
+a per-test timeout at all.
 
 ## Feature Flags
 

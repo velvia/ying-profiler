@@ -1,12 +1,15 @@
 [package]
 name = "ying-profiler"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["Evan Chan <velvia@gmail.com>"]
 description = "Sampling retained memory profiler for Rust, low resource usage, can write out flamegraphs."
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/velvia/ying-profiler"
+documentation = "https://docs.rs/ying-profiler"
+exclude = ["/.github", "/target", "*.svg"]
 categories = [
     "development-tools::debugging",
     "development-tools::profiling",
@@ -19,18 +22,17 @@ keywords = ["profiling", "sampling", "memory", "profiler", "flamegraph"]
 [dependencies]
 backtrace = "^0.3"
 coarsetime = "^0.1"
-chrono = "0.4.0"
-# This is custom dashmap that uses hashbrown using System allocator, not global.  Removes most allocations
-# to make our lives easier
-dashmap = { git = "https://github.com/velvia/dashmap", rev = "a6e36242044f86412531c24c437e95beadc67b62"}
-libc = "^0.2"
+chrono = "0.4"
 log = "^0.4"
 once_cell = "1.14"
 regex = "^1.6"
 wyhash = "0.5.0"
 tracing = { version = "^0.1.30", optional = true }
-inferno = "0.9"
+inferno = "0.12"
 derive_builder = "0.20"
+
+[target."cfg(unix)".dependencies]
+libc = "^0.2"
 
 [dev-dependencies]
 futures = "^0.3"
@@ -47,3 +49,6 @@ profile-spans = ["tracing"]
 strip = "none"
 # debug = 1 means line charts only, which is minimum needed for good stack traces
 debug = 1
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }

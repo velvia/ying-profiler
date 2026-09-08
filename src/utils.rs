@@ -1,10 +1,15 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
-use std::{fs::File, io::Cursor};
+use std::{
+    fs::{create_dir_all, File},
+    io::Cursor,
+};
 
 use callstack::Measurement;
+use chrono::{offset::Local, SecondsFormat};
 use derive_builder::Builder;
 use inferno::collapse::{dtrace, Collapse};
 use inferno::flamegraph;
@@ -27,18 +32,20 @@ use super::*;
 /// Note that ProfilerRunner uses log framework to periodically dump out logs.  The app is responsible
 /// for initializing the logging infrastructure.
 ///
-/// To run:
-/// ```
+/// To run.  `no_run` because spawning the reporting thread and creating its output directory are
+/// side effects that do not belong in a doctest:
+/// ```no_run
 ///     use ying_profiler::{YingProfiler, utils::ProfilerRunner};
 ///     static YING_ALLOC: YingProfiler = YingProfiler::default();
 ///     ProfilerRunner::default().spawn(&YING_ALLOC);
 /// ```
 ///
 /// Builder pattern can also be used.
-/// ```
+/// ```no_run
 ///     use ying_profiler::{YingProfiler, utils::ProfilerRunnerBuilder};
 ///     static YING_ALLOC: YingProfiler = YingProfiler::default();
 ///     let runner = ProfilerRunnerBuilder::default()
+///         .check_interval_secs(60usize)
 ///         .gen_flamegraphs(true)
 ///         .reporting_path("profiler_output/")
 ///         .build()
@@ -49,10 +56,10 @@ use super::*;
 #[builder(setter(into))]
 pub struct ProfilerRunner {
     /// Number of seconds in between memory checks
-    #[builder(default = "300")]
+    #[builder(default = "DEFAULT_CHECK_INTERVAL_SECS")]
     check_interval_secs: usize,
     /// Percent change in retained memory to trigger a report
-    #[builder(default = "10")]
+    #[builder(default = "DEFAULT_PCT_CHANGE_TRIGGER")]
     report_pct_change_trigger: usize,
     /// Path to write top retained memory reports to
     #[builder(default)]
@@ -70,11 +77,28 @@ pub struct ProfilerRunner {
 
 const INITIAL_RETAINED_MEM_MB: usize = 20;
 
+/// Directory that [`YingProfiler::start_profiling`](crate::YingProfiler::start_profiling) writes
+/// reports and flamegraphs to.
+pub const DEFAULT_REPORTING_PATH: &str = "ying-profiles";
+
+/// Default seconds between memory checks.
+pub const DEFAULT_CHECK_INTERVAL_SECS: usize = 300;
+
+/// Default percent change in memory that triggers a report.
+pub const DEFAULT_PCT_CHANGE_TRIGGER: usize = 10;
+
 /// Creates a new ProfilerRunner with default values.  Writes reports to current directory, does not expand frames,
 /// every 5 minute checks on memory, 10% change triggers report.  No flamegraphs, retained memory.
 impl Default for ProfilerRunner {
     fn default() -> Self {
-        Self::new(300, 10, "", false, false, false)
+        Self::new(
+            DEFAULT_CHECK_INTERVAL_SECS,
+            DEFAULT_PCT_CHANGE_TRIGGER,
+            "",
+            false,
+            false,
+            false,
+        )
     }
 }
 
@@ -98,8 +122,18 @@ impl ProfilerRunner {
         }
     }
 
-    /// Spawn a new background thread to run profiler and get stats
+    /// Spawn a new background thread to run profiler and get stats.
+    /// Creates `reporting_path` if it does not already exist.
     pub fn spawn(&self, profiler: &'static YingProfiler) {
+        if !self.reporting_path.is_empty() {
+            if let Err(e) = create_dir_all(&self.reporting_path) {
+                error!(
+                    "Ying: could not create reporting directory {:?}, reports will not be written: {}",
+                    &self.reporting_path, e
+                );
+            }
+        }
+
         let check_interval_secs = self.check_interval_secs;
         let report_pct_change_trigger = self.report_pct_change_trigger;
         let reporting_path = PathBuf::from(self.reporting_path.clone());
@@ -112,11 +146,11 @@ impl ProfilerRunner {
         };
         let gen_flamegraphs = self.gen_flamegraphs;
 
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let mut last_retained_mem = INITIAL_RETAINED_MEM_MB as f64;
 
             loop {
-                std::thread::sleep(Duration::from_secs(check_interval_secs as u64));
+                thread::sleep(Duration::from_secs(check_interval_secs as u64));
 
                 // Check and compare memory
                 let new_allocated = YingProfiler::total_retained_bytes() as f64 / (1024.0 * 1024.0);
@@ -147,8 +181,8 @@ impl ProfilerRunner {
                     }
 
                     // Formulate profiling filename based on ISO8601 timestamp and number of MBs
-                    let dt = chrono::offset::Local::now();
-                    let dt_str = dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let dt = Local::now();
+                    let dt_str = dt.to_rfc3339_opts(SecondsFormat::Secs, true);
                     let dump_name = format!("ying.{}.{}MB.report", dt_str, new_allocated as i64);
 
                     let mut report_path = reporting_path.clone();
@@ -248,5 +282,23 @@ mod tests {
         assert!(runner.gen_flamegraphs);
         assert_eq!(runner.report_pct_change_trigger, 10);
         assert_eq!(runner.reporting_path, "");
+    }
+
+    #[test]
+    fn test_profiler_runner_builder_overrides() {
+        let runner = ProfilerRunnerBuilder::default()
+            .check_interval_secs(60usize)
+            .report_pct_change_trigger(25usize)
+            .reporting_path("profiler_output/")
+            .expand_frames(true)
+            .measure_allocated_not_retained(true)
+            .build()
+            .unwrap();
+        assert_eq!(runner.check_interval_secs, 60);
+        assert_eq!(runner.report_pct_change_trigger, 25);
+        assert_eq!(runner.reporting_path, "profiler_output/");
+        assert!(runner.expand_frames);
+        assert!(runner.measure_allocated_not_retained);
+        assert!(!runner.gen_flamegraphs);
     }
 }
