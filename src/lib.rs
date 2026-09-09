@@ -322,7 +322,7 @@ impl YingProfiler {
             .get_state()
             .stack_stats
             .map_to_vec(|stack_hash, stats| (stack_hash, stats.allocated_bytes));
-        items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        items.sort_unstable_by_key(|&(_, bytes)| std::cmp::Reverse(bytes));
         items
     }
 
@@ -334,7 +334,7 @@ impl YingProfiler {
             .get_state()
             .stack_stats
             .map_to_vec(|stack_hash, stats| (stack_hash, stats.retained_profiled_bytes()));
-        items.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        items.sort_unstable_by_key(|&(_, bytes)| std::cmp::Reverse(bytes));
         items
     }
 

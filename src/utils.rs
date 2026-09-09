@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::thread;
@@ -129,7 +128,7 @@ impl ProfilerRunner {
             if let Err(e) = create_dir_all(&self.reporting_path) {
                 error!(
                     "Ying: could not create reporting directory {:?}, reports will not be written: {}",
-                    &self.reporting_path, e
+                    self.reporting_path, e
                 );
             }
         }
@@ -196,7 +195,7 @@ impl ProfilerRunner {
                             );
                         }
                     } else {
-                        error!("Error: could not write memory report to {:?}", &report_path);
+                        error!("Error: could not write memory report to {:?}", report_path);
                     }
 
                     if gen_flamegraphs {
@@ -204,7 +203,7 @@ impl ProfilerRunner {
                         let mut graph_path = reporting_path.clone();
                         graph_path.push(graph_name);
                         if let Err(e) = gen_flamegraph(profiler2, measurement, &graph_path) {
-                            error!("Error generating flame graph to {:?}: {}", &graph_path, e);
+                            error!("Error generating flame graph to {:?}: {}", graph_path, e);
                         }
                     }
                 }
