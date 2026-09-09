@@ -10,22 +10,26 @@
 //! * Track retained memory, including reallocs, as well as total allocations
 //! * Targets async Rust programs (especially Tokio apps that use tracing for instrumentation), so you know the stack
 //!   traces will be useful
-//!   - Specific support for tracing spans and finding allocations by span
-//!   - Removes extra `::poll::` lines in the stack trace for clarity
+//!   - Skips inlined `::poll::` frames in expanded stack traces for clarity
 //! * Support for detecting leaks or large amounts of allocated memory that has not been freed
 //!   - Tracks realloc() calls as single long-lived allocation
 //! * Automatic and easy flamegraph generation
 //! * Allocation lifetime/length histogram
-//! * Track span information (need feature profile_spans) in stacks
 //! * Get top stack traces by total allocation
 //! * Get top traces by retained allocation
 //! * `ProfilerRunner` -- utility to spin up thread to dump out reports and optionally flamegraphs every N minutes when
 //!   total memory usage changes significantly
 //! * Catch and prevent single allocations greater than say 64GB, dump out giant allocation stack trace
 //!
-//! To see an example which uses Ying and dumps out top stack traces by allocations:
+//! To see an example of a long-running toy service that generates the periodic reports and flamegraphs:
 //!
-//! `cargo run --profile bench --features profile-spans --example ying_example`
+//! `cargo run --profile bench --example ying_example`
+//!
+//! The example runs a cache workload plus a simulated leak for ~12 minutes — long enough for the
+//! reporting thread to write a report and flamegraph under `ying-profiles/` at every check.  For a
+//! quicker demo:
+//!
+//! `YING_EXAMPLE_INTERVAL_SECS=10 YING_EXAMPLE_RUNTIME_SECS=45 cargo run --profile bench --example ying_example`
 //!
 //! ## How to use
 //!
@@ -129,13 +133,10 @@
 //! A generic tool which just examines the IP and tries to figure out a single symbol would miss out on all of the
 //! inlined symbols.  Some tools can expand on symbols, but the results still aren't very good.
 //!
-//! ## Tracing support
+//! ## Feature Flags
 //!
-//! To add support for memory profiling of [tracing Spans](https://docs.rs/tracing/0.1.36/tracing/struct.Span.html),
-//! enable the `profile-spans` feature of this crate.  Span information will be recorded.
-//! NOTE: This feature is experimental and does not yet yield useful information.  It also causes a panic when
-//! used with `tracing_subscriber` due to a problem with `current_span()` allocating and potentially causing a
-//! RefCell `borrow()` to fail.
+//! - `profile_spans` - records tracing-span information in stacks.  NOTE: this feature is
+//!   experimental and incomplete.
 //!
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

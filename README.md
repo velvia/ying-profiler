@@ -2,7 +2,7 @@
 
 Ying is a native Rust sampling memory profiler which tracks retained memory and allocations.  It is designed for production usage in asynchronous Rust programs.  Ying(鷹) is Chinese for eagle.  🦅🦅🦅
 
-I started this experiment because existing solutions I looked at were either consuming too much resources, or
+I started this project because existing solutions I looked at were either consuming too many resources, or
 wrote profiling files that were too large or too cumbersome to consume, or were very bad at producing useful
 stack traces especially for Rust async programs, or did not support tracking retained memory in its profiling.
 
@@ -10,21 +10,43 @@ Features:
 * Sampling profiler, so it uses little enough resources to be useful in production
 * Track retained memory, including reallocs, as well as total allocations
 * Targets async Rust programs (especially Tokio apps that use tracing for instrumentation), so you know the stack traces will be useful
-  - Specific support for tracing spans and finding allocations by span
-  - Removes extra `::poll::` lines in the stack trace for clarity
+  - Skips inlined `::poll::` frames in expanded stack traces for clarity
 * Support for detecting leaks or large amounts of allocated memory that has not been freed
   - Tracks realloc() calls as single long-lived allocation
 * Automatic and easy flamegraph generation
 * Allocation lifetime/length histogram
-* Track span information (need feature profile_spans) in stacks
 * Get top stack traces by total allocation
 * Get top traces by retained allocation
 * `ProfilerRunner` -- utility to spin up thread to dump out reports and optionally flamegraphs every N minutes when total memory usage changes significantly
 * Catch and prevent single allocations greater than say 64GB, dump out giant allocation stack trace
 
-To see an example which uses Ying and dumps out top stack traces by allocations:
+To see an example of a long-running toy service that generates the periodic reports and flamegraphs:
 
-`cargo run --profile bench --features profile-spans --example ying_example`
+`cargo run --profile bench --example ying_example`
+
+The example runs a cache workload plus a simulated leak for ~12 minutes — long enough for the
+reporting thread to write a `ying.<timestamp>.<MB>MB.report` and a `.svg` flamegraph under
+`ying-profiles/` at every check.  For a quicker demo, shorten the interval and runtime:
+
+`YING_EXAMPLE_INTERVAL_SECS=10 YING_EXAMPLE_RUNTIME_SECS=45 cargo run --profile bench --example ying_example`
+
+Every report and flamegraph pair is named with the ISO8601 timestamp of when it was written and
+the total retained memory at that moment, so a plain `ls` of the output directory is already a
+memory timeline — you can see when memory grew and by how much before opening anything:
+
+```bash
+$ ls -l ying-profiles/
+total 440
+-rw-r--r--  1 evan  staff  17583 Sep  9 16:45 ying.2026-09-09T16:45:05-04:00.15MB.report
+-rw-r--r--  1 evan  staff  50492 Sep  9 16:45 ying.2026-09-09T16:45:05-04:00.15MB.svg
+-rw-r--r--  1 evan  staff  16254 Sep  9 16:45 ying.2026-09-09T16:45:15-04:00.23MB.report
+-rw-r--r--  1 evan  staff  49262 Sep  9 16:45 ying.2026-09-09T16:45:15-04:00.23MB.svg
+-rw-r--r--  1 evan  staff  26162 Sep  9 16:48 ying.2026-09-09T16:48:51-04:00.28MB.report
+-rw-r--r--  1 evan  staff  50765 Sep  9 16:48 ying.2026-09-09T16:48:51-04:00.28MB.svg
+```
+
+Here memory went from 15MB to 23MB in ten seconds, then to 28MB — pick the report just before
+the jump and diff it against the one after to see exactly which stacks grew.
 
 ## How to use
 
@@ -148,8 +170,7 @@ see which lock the hung threads are parked on; on macOS the report lands in
 
 ## Feature Flags
 
-- `profile_spans` - gets the current span ID for recorded stacks.   NOTE: This feature is experimental and does not yet yield useful information.  It also causes a panic when used with `tracing_subscriber` due to a problem with `current_span()` allocating and potentially causing a RefCell `borrow()` to fail.
-
+- `profile_spans` - records tracing-span information in stacks.  NOTE: this feature is experimental and incomplete.
 ## Why a new memory profiler?
 
 All profilers are useful and represent amazing work by their authors.
