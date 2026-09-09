@@ -89,24 +89,38 @@ You do not need a runner at all if you would rather decide when to look.  `YingP
 
 ## Implementation notes
 
-Ying is the global allocator, so everything Ying allocates re-enters Ying.  Two rules keep that from
-turning into a deadlock, and both matter if you plan to change the code:
+Ying is the global allocator, so everything Ying allocates re-enters Ying.  Four rules keep that from
+turning into a deadlock, and they all matter if you plan to change the code:
 
 1. **The per-thread re-entrancy guard is checked before any profiler state is touched**, in `alloc`,
    `dealloc` and `realloc` alike.  The profiler's maps allocate and free internally (when a shard
    resizes, for instance), and those calls land back in the allocator while a shard lock is held.
    Touching the map first would try to take a lock the same thread already holds.
-2. **The profiler's own maps must not use locks that allocate.**  Ying previously used `DashMap`,
+2. **That guard has to be genuinely per-thread.**  It used to live in a slot of a fixed 1024 entry
+   array indexed by a hash of the thread id, with `&mut` handed out from `&self`.  Two threads whose
+   ids collide then share one guard, which is aliasing UB and, worse, loses increments: a non-atomic
+   bump can be dropped, the guard falls to zero while a thread is still inside its critical section,
+   and rule 1 silently stops holding.  It is now a `thread_local!` with a `const {}` initializer and
+   no `Drop`, which is what keeps TLS access from allocating - see the comment on `THREAD_STATE`.
+3. **The profiler's own maps must not use locks that allocate.**  Ying previously used `DashMap`,
    whose `RwLock` is built on `parking_lot_core`; `parking_lot_core` allocates its global parking
    table while holding its internal bucket locks, and that allocation comes back through Ying into
    DashMap, whose lock slow path then re-enters `parking_lot_core` and deadlocks.  No choice of
    allocator for the hash table fixes this.  Ying therefore uses a small sharded map built on
    `std::sync::RwLock`, which never allocates.
+4. **Nothing allocates while a shard lock is held**, even though rule 1 ought to make that safe.
+   Defence in depth: when rule 2 was broken, the captured backtrace of the hang showed a `Vec`
+   growing inside a map scan, calling back into `realloc`, and blocking on a shard lock the same
+   thread already held.  `ShardedMap::map_to_vec` therefore reserves with no lock held and only
+   fills within that reservation, so a future hole in the guard degrades into a retry rather than a
+   process-wide hang.
 
 ## Testing for deadlocks
 
 Every bug this crate has had in the allocator path was a deadlock, and deadlocks are probabilistic:
-one green test run means very little.  Two knobs make them reproducible.
+one green test run means very little.  The guard bug above showed up once in roughly a hundred suite
+runs, and a 300 run soak of the stock configuration missed it entirely, so reproducing these needs
+help.
 
 `YING_TEST_MAP_CAPACITY` overrides the initial capacity of every profiler map.  Setting it to `1`
 starts each map at zero capacity so shards resize constantly, and resizing is the path where a map
@@ -117,11 +131,20 @@ appears once in tens of runs wedges the process immediately:
 YING_TEST_MAP_CAPACITY=1 cargo nextest run --release --profile stress
 ```
 
+The general technique that found the guard bug is worth repeating for anything in this area: make
+the rare condition the normal one.  Shrinking the thread-id slot table from 1024 entries to 64 took
+the failure rate from 0 in 300 runs to 5 in 300, which was enough to catch it in minutes.
+
 Timeouts must come from outside the process.  Once the allocator is stuck, so is panicking and
 printing, so a test cannot report its own hang.  `cargo nextest` runs each test in a separate
 process and kills it on timeout (see `.config/nextest.toml`), and CI puts a `timeout-minutes` on
 every test step, because a bad enough bug wedges the binary during startup before nextest can apply
 a per-test timeout at all.
+
+When a test does hang, `with_watchdog` writes to stderr without allocating and then calls `abort`,
+so `SIGABRT` makes the OS capture a backtrace for *every* thread.  That is the only practical way to
+see which lock the hung threads are parked on; on macOS the report lands in
+`~/Library/Logs/DiagnosticReports`, and on Linux you need core dumps enabled.
 
 ## Feature Flags
 

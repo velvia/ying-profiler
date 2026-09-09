@@ -1,7 +1,9 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::fmt::Write;
 use std::hint::black_box;
+use std::io::{stderr, Write as IoWrite};
 use std::panic::resume_unwind;
+use std::process::abort;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::Arc;
@@ -53,7 +55,19 @@ fn with_watchdog(name: &str, timeout: Duration, body: impl FnOnce() + Send + 'st
             }
         }
         Err(RecvTimeoutError::Timeout) => {
-            panic!("{name} did not finish within {timeout:?}, which almost certainly means the allocator deadlocked")
+            // Deliberately not `panic!`.  Formatting a panic message allocates, and if the reason
+            // we got here is a wedged allocator then panicking hangs too, losing the one chance to
+            // learn anything.  Writing byte slices straight to fd 2 allocates nothing, and `abort`
+            // raises SIGABRT so the OS crash reporter captures a backtrace for *every* thread —
+            // the only way to see which lock the hung threads are actually parked on.  On macOS
+            // that lands in ~/Library/Logs/DiagnosticReports; on Linux, enable a core dump.
+            let mut err = stderr().lock();
+            let _ = err.write_all(b"\nWATCHDOG TIMEOUT in test: ");
+            let _ = err.write_all(name.as_bytes());
+            let _ =
+                err.write_all(b"\nlikely allocator deadlock; aborting to dump all thread stacks\n");
+            let _ = err.flush();
+            abort();
         }
     }
 }
