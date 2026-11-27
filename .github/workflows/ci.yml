@@ -60,10 +60,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
+      # Cargo.lock is not committed, so a fresh resolve picks the newest dependency versions, and
+      # those can require a newer rustc than our rust-version (backtrace 0.3.77 moved to 1.88).
+      # Resolving against rust-version asks the question that matters: does a working set of
+      # dependencies exist for our declared MSRV?
+      - run: cargo generate-lockfile
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
       - run: cargo check --lib --all-features
 
-  # Ying uses platform-specific APIs to get a thread id without touching TLS, so the non-host
-  # platforms need at least a compile check
+  # The test matrix does not run Windows, so at least make sure the library compiles there
   cross-check:
     runs-on: ubuntu-latest
     steps:
